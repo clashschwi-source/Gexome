@@ -153,38 +153,56 @@ const VolSmile = ({ticker}) => {
     useEffect(()=>{
         if(!sd||!ref.current) return;
         const cv=ref.current, ctx=cv.getContext('2d');
-        const W=cv.width, H=cv.height, P={t:40,r:50,b:55,l:72};
+        const W=cv.width, H=cv.height, P={t:44,r:60,b:60,l:76};
         ctx.clearRect(0,0,W,H); ctx.fillStyle='#070910'; ctx.fillRect(0,0,W,H);
         const series=sd.series;
         if(!series?.length) return;
-        const allIV=series.flatMap(s=>s.points.map(p=>p.iv));
-        const allS=series.flatMap(s=>s.points.map(p=>p.strike));
+
+        // ── IQR Outlier-Filter pro Serie ──────────────────────────
+        // Entfernt Yahoo-Garbage (tief OTM spikes) bevor die Achse berechnet wird
+        const iqrFilter = (points) => {
+            if(points.length < 4) return points;
+            const sorted = [...points].sort((a,b)=>a.iv-b.iv);
+            const q1 = sorted[Math.floor(sorted.length*0.25)].iv;
+            const q3 = sorted[Math.floor(sorted.length*0.75)].iv;
+            const iqr = q3-q1;
+            const lo = q1 - iqr*2.5;
+            const hi = q3 + iqr*2.5;
+            return points.filter(p=>p.iv>=lo && p.iv<=hi);
+        };
+
+        const cleanSeries = series.map(s=>({...s, points: iqrFilter(s.points)}))
+                                  .filter(s=>s.points.length>=2);
+        if(!cleanSeries.length) return;
+
+        const allIV = cleanSeries.flatMap(s=>s.points.map(p=>p.iv));
+        const allS  = cleanSeries.flatMap(s=>s.points.map(p=>p.strike));
         if(!allIV.length) return;
 
         // Y-Achse: echter IV Bereich + Puffer
         const rawMin=Math.min(...allIV), rawMax=Math.max(...allIV);
         const ivRange=Math.max(rawMax-rawMin, 1);
-        const minIV=Math.max(0, rawMin - ivRange*0.15);
-        const maxIV=rawMax + ivRange*0.20;
+        const minIV=Math.max(0, rawMin - ivRange*0.18);
+        const maxIV=rawMax + ivRange*0.22;
 
-        // X-Achse: Strike-Range + 5% Padding auf jeder Seite
+        // X-Achse: Strike-Range + 6% Padding auf jeder Seite
         const minS=Math.min(...allS), maxS=Math.max(...allS);
         const sRange=maxS-minS;
-        const padS=sRange*0.05;
+        const padS=sRange*0.06;
         const xMin=minS-padS, xMax=maxS+padS;
         const S=sd.currentPrice;
         const toX=s=>P.l+(s-xMin)/(xMax-xMin)*(W-P.l-P.r);
         const toY=iv=>H-P.b-(iv-minIV)/(maxIV-minIV)*(H-P.t-P.b);
 
         // Horizontale Grid-Linien
-        const ivStep=parseFloat(((maxIV-minIV)/5).toPrecision(2));
-        const ivStart=Math.ceil(minIV/ivStep)*ivStep;
+        const nLines=5;
         ctx.lineWidth=1;
-        for(let iv=ivStart; iv<=maxIV+0.01; iv+=ivStep){
+        for(let i=0;i<=nLines;i++){
+            const iv=minIV+(maxIV-minIV)*i/nLines;
             const y=toY(iv);
             ctx.strokeStyle='#151c30'; ctx.beginPath(); ctx.moveTo(P.l,y); ctx.lineTo(W-P.r,y); ctx.stroke();
             ctx.fillStyle='#506080'; ctx.font='11px monospace'; ctx.textAlign='right';
-            ctx.fillText(iv.toFixed(1)+'%',P.l-6,y+4);
+            ctx.fillText(iv.toFixed(1)+'%',P.l-8,y+4);
         }
         // Vertikale Grid-Linien
         for(let i=0;i<=7;i++){
@@ -200,12 +218,11 @@ const VolSmile = ({ticker}) => {
         ctx.beginPath(); ctx.moveTo(sx,P.t); ctx.lineTo(sx,H-P.b); ctx.stroke();
         ctx.setLineDash([]);
         ctx.fillStyle='#ffdd00'; ctx.font='bold 11px monospace'; ctx.textAlign='center';
-        ctx.fillText('SPOT $'+(S?.toFixed(0)),sx,H-P.b+34);
+        ctx.fillText('SPOT $'+(S?.toFixed(0)),sx,H-P.b+36);
 
-        // Series
-        series.forEach((s,i)=>{
+        // Series zeichnen
+        cleanSeries.forEach((s,i)=>{
             const color=SMILE_COLORS[i%SMILE_COLORS.length];
-            if(s.points.length<2) return;
             ctx.strokeStyle=color; ctx.lineWidth=2.5;
             ctx.beginPath();
             s.points.forEach((p,j)=>{ const x=toX(p.strike),y=toY(p.iv); j===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
@@ -215,7 +232,7 @@ const VolSmile = ({ticker}) => {
         });
 
         ctx.fillStyle='#606880'; ctx.font='bold 12px monospace'; ctx.textAlign='left';
-        ctx.fillText(sd.ticker+' · Volatility Smile · 0-5 DTE',P.l,22);
+        ctx.fillText(sd.ticker+' · Volatility Smile · 0-5 DTE',P.l,24);
     },[sd]);
 
     return (
