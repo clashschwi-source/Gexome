@@ -203,11 +203,23 @@ def get_smile(ticker):
                     else:
                         continue
 
+                    # Filter unrealistische IV Werte (yfinance Garbage bei tief OTM)
+                    iv_pct = float(iv) * 100
+                    if iv_pct < 3 or iv_pct > 200:
+                        continue
+                    # Mindest-Volumen/OI Filter
+                    cd_oi  = int(cd['openInterest'].sum())  if not cd.empty  and 'openInterest'  in cd.columns  else 0
+                    pd_oi  = int(pd_['openInterest'].sum()) if not pd_.empty and 'openInterest'  in pd_.columns else 0
+                    cd_vol = int(cd['volume'].sum())        if not cd.empty  and 'volume'        in cd.columns  else 0
+                    pd_vol = int(pd_['volume'].sum())       if not pd_.empty and 'volume'        in pd_.columns else 0
+                    if cd_oi + pd_oi < 5 and cd_vol + pd_vol < 2:
+                        continue
+
                     moneyness = round(float(np.log(strike / current_price)), 4)
                     points.append({
                         'strike': int(strike),
                         'moneyness': moneyness,
-                        'iv': round(float(iv) * 100, 2),
+                        'iv': round(iv_pct, 2),
                     })
 
                 if points:
