@@ -50,12 +50,14 @@ const GREEKS=[
 // ─── KEY LEVELS ────────────────────────────────────────────────
 const KeyLevels = ({data, onClose}) => {
     const rows=data.data, S=data.currentPrice;
+    // Kumulativer GEX Nulldurchgang = echter Gamma Flip
     let gammaFlip=null;
-    for(let i=0;i<rows.length-1;i++){
-        if((rows[i].gex<0&&rows[i+1].gex>=0)||(rows[i].gex>=0&&rows[i+1].gex<0)){
-            gammaFlip=rows[i+1].strike; break;
-        }
-    }
+    {let cum=0,prev=null;
+    for(let i=0;i<rows.length;i++){
+        cum+=(rows[i].gex||0);
+        if(prev!==null&&((prev<0&&cum>=0)||(prev>=0&&cum<0))){gammaFlip=rows[i].strike;break;}
+        prev=cum;
+    }}
     const maxCallOI=[...rows].sort((a,b)=>b.call_oi-a.call_oi)[0];
     const maxPutOI =[...rows].sort((a,b)=>b.put_oi-a.put_oi)[0];
     const top2gex  =[...rows].sort((a,b)=>Math.abs(b.gex)-Math.abs(a.gex)).slice(0,2);
@@ -293,11 +295,12 @@ const App = () => {
                     {(()=>{
                         const rows=data.data, S=data.currentPrice;
                         let flip=null;
-                        for(let i=0;i<rows.length-1;i++){
-                            if((rows[i].gex<0&&rows[i+1].gex>=0)||(rows[i].gex>=0&&rows[i+1].gex<0)){
-                                flip=rows[i+1].strike; break;
-                            }
-                        }
+                        {let cum=0,prev=null;
+                        for(let i=0;i<rows.length;i++){
+                            cum+=(rows[i].gex||0);
+                            if(prev!==null&&((prev<0&&cum>=0)||(prev>=0&&cum<0))){flip=rows[i].strike;break;}
+                            prev=cum;
+                        }}
                         if(!flip) return null;
                         const positive = S > flip;
                         return (
