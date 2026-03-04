@@ -153,7 +153,7 @@ const VolSmile = ({ticker}) => {
     useEffect(()=>{
         if(!sd||!ref.current) return;
         const cv=ref.current, ctx=cv.getContext('2d');
-        const W=cv.width, H=cv.height, P={t:40,r:30,b:50,l:62};
+        const W=cv.width, H=cv.height, P={t:40,r:50,b:55,l:72};
         ctx.clearRect(0,0,W,H); ctx.fillStyle='#070910'; ctx.fillRect(0,0,W,H);
         const series=sd.series;
         if(!series?.length) return;
@@ -161,52 +161,61 @@ const VolSmile = ({ticker}) => {
         const allS=series.flatMap(s=>s.points.map(p=>p.strike));
         if(!allIV.length) return;
 
+        // Y-Achse: echter IV Bereich + Puffer
         const rawMin=Math.min(...allIV), rawMax=Math.max(...allIV);
-        const ivRange=rawMax-rawMin;
-        const minIV=Math.max(0, rawMin - ivRange*0.08);
-        const maxIV=rawMax + ivRange*0.12;
+        const ivRange=Math.max(rawMax-rawMin, 1);
+        const minIV=Math.max(0, rawMin - ivRange*0.15);
+        const maxIV=rawMax + ivRange*0.20;
 
-        const S=sd.currentPrice;
+        // X-Achse: Strike-Range + 5% Padding auf jeder Seite
         const minS=Math.min(...allS), maxS=Math.max(...allS);
-        const toX=s=>P.l+(s-minS)/(maxS-minS)*(W-P.l-P.r);
+        const sRange=maxS-minS;
+        const padS=sRange*0.05;
+        const xMin=minS-padS, xMax=maxS+padS;
+        const S=sd.currentPrice;
+        const toX=s=>P.l+(s-xMin)/(xMax-xMin)*(W-P.l-P.r);
         const toY=iv=>H-P.b-(iv-minIV)/(maxIV-minIV)*(H-P.t-P.b);
 
+        // Horizontale Grid-Linien
         const ivStep=parseFloat(((maxIV-minIV)/5).toPrecision(2));
         const ivStart=Math.ceil(minIV/ivStep)*ivStep;
         ctx.lineWidth=1;
         for(let iv=ivStart; iv<=maxIV+0.01; iv+=ivStep){
             const y=toY(iv);
             ctx.strokeStyle='#151c30'; ctx.beginPath(); ctx.moveTo(P.l,y); ctx.lineTo(W-P.r,y); ctx.stroke();
-            ctx.fillStyle='#506080'; ctx.font='10px monospace'; ctx.textAlign='right';
-            ctx.fillText(iv.toFixed(1)+'%',P.l-5,y+4);
+            ctx.fillStyle='#506080'; ctx.font='11px monospace'; ctx.textAlign='right';
+            ctx.fillText(iv.toFixed(1)+'%',P.l-6,y+4);
         }
+        // Vertikale Grid-Linien
         for(let i=0;i<=7;i++){
-            const s=minS+(maxS-minS)*i/7, x=toX(s);
+            const s=xMin+(xMax-xMin)*i/7, x=toX(s);
             ctx.strokeStyle='#151c30'; ctx.beginPath(); ctx.moveTo(x,P.t); ctx.lineTo(x,H-P.b); ctx.stroke();
-            ctx.fillStyle='#506080'; ctx.font='9px monospace'; ctx.textAlign='center';
-            ctx.fillText('$'+Math.round(s),x,H-P.b+16);
+            ctx.fillStyle='#506080'; ctx.font='10px monospace'; ctx.textAlign='center';
+            ctx.fillText('$'+Math.round(s),x,H-P.b+18);
         }
 
+        // Spot line
         const sx=toX(S);
         ctx.strokeStyle='rgba(255,220,0,0.7)'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
         ctx.beginPath(); ctx.moveTo(sx,P.t); ctx.lineTo(sx,H-P.b); ctx.stroke();
         ctx.setLineDash([]);
-        ctx.fillStyle='#ffdd00'; ctx.font='bold 10px monospace'; ctx.textAlign='center';
-        ctx.fillText('SPOT $'+(S?.toFixed(0)),sx,H-P.b+30);
+        ctx.fillStyle='#ffdd00'; ctx.font='bold 11px monospace'; ctx.textAlign='center';
+        ctx.fillText('SPOT $'+(S?.toFixed(0)),sx,H-P.b+34);
 
+        // Series
         series.forEach((s,i)=>{
             const color=SMILE_COLORS[i%SMILE_COLORS.length];
             if(s.points.length<2) return;
-            ctx.strokeStyle=color; ctx.lineWidth=2;
+            ctx.strokeStyle=color; ctx.lineWidth=2.5;
             ctx.beginPath();
             s.points.forEach((p,j)=>{ const x=toX(p.strike),y=toY(p.iv); j===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
             ctx.stroke();
             ctx.fillStyle=color;
-            s.points.forEach(p=>{ ctx.beginPath(); ctx.arc(toX(p.strike),toY(p.iv),2.5,0,Math.PI*2); ctx.fill(); });
+            s.points.forEach(p=>{ ctx.beginPath(); ctx.arc(toX(p.strike),toY(p.iv),3,0,Math.PI*2); ctx.fill(); });
         });
 
-        ctx.fillStyle='#606880'; ctx.font='bold 11px monospace'; ctx.textAlign='left';
-        ctx.fillText(sd.ticker+' · Volatility Smile · 0-5 DTE',P.l,20);
+        ctx.fillStyle='#606880'; ctx.font='bold 12px monospace'; ctx.textAlign='left';
+        ctx.fillText(sd.ticker+' · Volatility Smile · 0-5 DTE',P.l,22);
     },[sd]);
 
     return (
@@ -240,7 +249,7 @@ const VolSmile = ({ticker}) => {
 // ─── APP ───────────────────────────────────────────────────────
 const App = () => {
     const [ticker,setTicker]=useState('QQQ'), [input,setInput]=useState('QQQ');
-    const [dte,setDte]=useState(0), [strikes,setStrikes]=useState(50);
+    const [dte,setDte]=useState(0), [strikes,setStrikes]=useState(30);
     const [loading,setLoading]=useState(false), [error,setError]=useState(null);
     const [data,setData]=useState(null), [showKL,setShowKL]=useState(false);
 
@@ -315,27 +324,16 @@ const App = () => {
                     <span className="text-yellow-600">⏱ 60s</span>
                     {error&&<span className="text-red-400">⚠️ {error}</span>}
                     {/* REGIME INDICATOR */}
-                    {(()=>{
-                        if(!data) return null;
-                        const flip = findGammaFlip(data.data, data.currentPrice);
-                        if(!flip) return null;
-                        const positive = data.currentPrice > flip;
-                        return (
-                            <div className="ml-auto flex items-center gap-2 px-4 py-1 rounded-full border"
-                                style={{
-                                    backgroundColor: positive ? 'rgba(0,200,160,0.12)' : 'rgba(140,0,255,0.15)',
-                                    borderColor: positive ? 'rgba(0,200,160,0.5)' : 'rgba(140,0,255,0.5)',
-                                }}>
-                                <div className="w-2 h-2 rounded-full animate-pulse"
-                                    style={{backgroundColor: positive ? 'rgb(0,200,160)' : 'rgb(140,0,255)'}}/>
-                                <span className="font-bold tracking-wider text-xs"
-                                    style={{color: positive ? 'rgb(0,200,160)' : 'rgb(160,80,255)'}}>
-                                    {positive ? '▲ LONG GAMMA' : '▼ SHORT GAMMA'}
-                                </span>
-                                <span className="text-gray-600">Flip @ ${flip}</span>
-                            </div>
-                        );
-                    })()}
+                    {data&&(
+                        <div className="ml-auto flex items-center gap-2 px-4 py-1 rounded-full border"
+                            style={{backgroundColor:'rgba(80,80,100,0.15)', borderColor:'rgba(120,120,160,0.4)'}}>
+                            <div className="w-2 h-2 rounded-full bg-gray-500"/>
+                            <span className="font-bold tracking-wider text-xs text-gray-400">
+                                ◆ REGIME UNKNOWN
+                            </span>
+                            <span className="text-gray-600">better API needed</span>
+                        </div>
+                    )}
                 </div>}
             </div>
 
@@ -347,7 +345,7 @@ const App = () => {
 
             {data&&<>
                 <div className="overflow-x-auto">
-                    <table className="border-collapse text-xs w-full">
+                    <table className="border-collapse text-sm w-full">
                         <thead className="sticky top-[57px] z-20">
                             <tr>
                                 <th className="sticky left-0 z-30 bg-gray-900 border-r border-gray-700 px-3 py-2 text-left text-gray-400 w-16">Strike</th>
