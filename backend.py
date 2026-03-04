@@ -1,190 +1,170 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import yfinance as yf
-import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
+import pytz
 
 app = Flask(__name__)
 CORS(app)
 
+def get_eastern_today():
+    """Gibt das heutige Datum in US Eastern Time zurück (wo die Märkte laufen)"""
+    eastern = pytz.timezone('US/Eastern')
+    now_eastern = datetime.now(eastern)
+    return now_eastern.date()
+
+def calc_charm(call_data, put_data, call_oi, put_oi, dte):
+    """
+    Charm = dDelta/dTime (auch Delta Decay genannt)
+    Approximation: charm ≈ -gamma * (r + (d2/T)) / (2*T)
+    Wir nutzen: charm_proxy = gamma * sqrt(T) als einfache Annäherung
+    Da yfinance kein charm liefert, approximieren wir es aus gamma und dte
+    """
+    try:
+        if 'gamma' not in call_data.columns:
+            return 0
+        call_gamma = call_data['gamma'].sum() if not call_data.empty else 0
+        put_gamma = put_data['gamma'].sum() if not put_data.empty else 0
+        T = max(dte, 0.5) / 365  # Zeit in Jahren, minimum 0.5 Tage
+        # Charm Approximation: gamma * sqrt(T) * OI
+        call_charm = call_oi * call_gamma * np.sqrt(T) * 100
+        put_charm = put_oi * put_gamma * np.sqrt(T) * 100
+        charm = (call_charm - put_charm) / 1_000_000
+        return round(charm, 2)
+    except:
+        return 0
+
 @app.route('/api/options/<ticker>')
 def get_options(ticker):
     try:
-        # Parameter aus Request
         num_strikes = int(request.args.get('strikes', 50))
-        strike_step = int(request.args.get('strike_step', 1))
-        exposure_type = request.args.get('exposure', 'gamma')  # gamma, delta, oder vanna
-        
-        print(f"\n📡 Lade Daten für {ticker} (Strikes: {num_strikes}, Step: {strike_step}, Exposure: {exposure_type})...")
-        
-        # Hole Ticker Daten
+        selected_dte = int(request.args.get('dte', 0))  # Welches DTE soll angezeigt werden
+
+        print(f"\n📡 Lade Daten für {ticker}, DTE={selected_dte}...")
+
         stock = yf.Ticker(ticker)
         current_price = stock.info.get('currentPrice') or stock.info.get('regularMarketPrice')
-        
+
+        if not current_price:
+            hist = stock.history(period='1d')
+            if not hist.empty:
+                current_price = float(hist['Close'].iloc[-1])
+
         if not current_price:
             return jsonify({'error': 'Kein aktueller Preis verfügbar'}), 404
-        
+
         print(f"✅ Aktueller Preis: ${current_price}")
-        
-        # Hole alle Expirations
+
         all_expirations = stock.options
-        
         if not all_expirations:
             return jsonify({'error': 'Keine Options-Daten verfügbar'}), 404
-        
-        # Suche GENAU 0DTE, 1DTE, 2DTE, 3DTE, 4DTE
-        today = datetime.now().date()
-        target_dtes = {0, 1, 2, 3, 4}
-        dte_map = {}  # DTE -> Expiration Date
-        
-        for exp_date in all_expirations[:30]:  # Prüfe mehr Expirations
-            exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d').date()
-            dte = (exp_datetime - today).days
-            
-            if dte in target_dtes and dte not in dte_map:
-                dte_map[dte] = exp_date
-                print(f"  ✅ Gefunden: {exp_date} ({dte}DTE)")
-        
-        # Sortiere nach DTE und erstelle finale Liste
-        expirations = []
-        for dte in sorted(dte_map.keys()):
-            expirations.append(dte_map[dte])
-        
-        if not expirations:
-            return jsonify({'error': f'Keine 0-4 DTE Expirations gefunden. Verfügbare DTEs: {sorted(set((datetime.strptime(d, "%Y-%m-%d").date() - today).days for d in all_expirations[:30]))}'}), 404
-        
-        # Hole verfügbare Strikes von der ersten Expiration
-        first_exp = expirations[0]
-        opt_sample = stock.option_chain(first_exp)
-        
-        # Extrahiere alle verfügbaren Strikes
+
+        # Timezone-korrektes heutiges Datum (US Eastern)
+        today = get_eastern_today()
+        print(f"📅 Heute (Eastern): {today}")
+
+        # Finde verfügbare DTEs (0-7)
+        available_dtes = {}
+        for exp_date in all_expirations[:20]:
+            exp_day = datetime.strptime(exp_date, '%Y-%m-%d').date()
+            dte = (exp_day - today).days
+            if 0 <= dte <= 7 and dte not in available_dtes:
+                available_dtes[dte] = exp_date
+                print(f"  ✅ {exp_date} = {dte}DTE")
+
+        if not available_dtes:
+            return jsonify({
+                'error': f'Keine 0-7 DTE Expirations. Nächste: {list(all_expirations[:5])}'
+            }), 404
+
+        # Wenn gewünschtes DTE nicht verfügbar, nimm nächstes
+        if selected_dte not in available_dtes:
+            selected_dte = min(available_dtes.keys())
+            print(f"⚠️ DTE {selected_dte} nicht gefunden, nutze: {selected_dte}")
+
+        exp_date = available_dtes[selected_dte]
+        opt = stock.option_chain(exp_date)
+        calls = opt.calls
+        puts = opt.puts
+
+        print(f"📊 Lade {exp_date} ({selected_dte}DTE): {len(calls)} Calls, {len(puts)} Puts")
+        print(f"   Verfügbare Greeks: {[c for c in calls.columns if c in ['delta','gamma','vega','theta','vanna','charm']]}")
+
+        # Strikes auswählen
         available_strikes = sorted(set(
-            list(opt_sample.calls['strike'].unique()) + 
-            list(opt_sample.puts['strike'].unique())
+            list(calls['strike'].unique()) +
+            list(puts['strike'].unique())
         ))
-        
-        # Filtere Strikes um den aktuellen Preis herum
-        strike_range_count = num_strikes // 2
-        
-        # Finde nächsten Strike zum aktuellen Preis
+
         closest_strike = min(available_strikes, key=lambda x: abs(x - current_price))
         closest_idx = available_strikes.index(closest_strike)
-        
-        # Nimm Strikes um den aktuellen Preis
-        start_idx = max(0, closest_idx - strike_range_count)
-        end_idx = min(len(available_strikes), closest_idx + strike_range_count + 1)
-        
+        half = num_strikes // 2
+        start_idx = max(0, closest_idx - half)
+        end_idx = min(len(available_strikes), closest_idx + half + 1)
         strikes = [int(round(s)) for s in available_strikes[start_idx:end_idx]]
-        
-        print(f"✅ Verfügbare Strikes von Yahoo: {len(available_strikes)} total")
-        print(f"✅ Gewählte Strikes: {len(strikes)} von {min(strikes)} bis {max(strikes)}")
-        
-        # Sammle Exposure Daten - OPTIMIERT: Nur 1x pro Expiration laden!
+
+        print(f"✅ {len(strikes)} Strikes: {min(strikes)} - {max(strikes)}")
+
+        # Berechne GEX, DEX, Charm für jeden Strike
         exposure_data = []
-        dates = []
-        labels = []
-        options_cache = {}  # Cache für Options Chains
-        
-        for idx, exp_date in enumerate(expirations):
-            try:
-                # Lade Options Chain nur 1x pro Expiration
-                opt = stock.option_chain(exp_date)
-                options_cache[exp_date] = {
-                    'calls': opt.calls,
-                    'puts': opt.puts
-                }
-                
-                # Berechne DTE (Days to Expiration)
-                exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d').date()
-                dte = (exp_datetime - datetime.now().date()).days
-                
-                dates.append(exp_date)
-                labels.append(f"{dte}DTE")
-                
-                print(f"  📅 {exp_date} ({dte}DTE) - Calls: {len(opt.calls)}, Puts: {len(opt.puts)}")
-                
-            except Exception as e:
-                print(f"  ⚠️ Fehler bei {exp_date}: {e}")
-                continue
-        
-        if not dates:
-            return jsonify({'error': 'Keine gültigen 0-4 DTE Expirations gefunden'}), 404
-        
-        # Erstelle Exposure Matrix - verwende gecachte Daten
         for strike in strikes:
-            row = {'strike': strike}
-            
-            for exp_date in dates:
-                try:
-                    calls = options_cache[exp_date]['calls']
-                    puts = options_cache[exp_date]['puts']
-                    
-                    # Finde nächsten verfügbaren Strike
-                    call_data = calls[calls['strike'] == strike]
-                    put_data = puts[puts['strike'] == strike]
-                    
-                    if call_data.empty and put_data.empty:
-                        row[exp_date] = 0
-                        continue
-                    
-                    # Hole Open Interest
-                    call_oi = call_data['openInterest'].sum() if not call_data.empty else 0
-                    put_oi = put_data['openInterest'].sum() if not put_data.empty else 0
-                    
-                    # Berechne basierend auf Exposure Type
-                    if exposure_type == 'delta':
-                        # DELTA EXPOSURE (DEX)
-                        if 'delta' in calls.columns and 'delta' in puts.columns:
-                            call_delta = call_data['delta'].sum() if not call_data.empty else 0
-                            put_delta = put_data['delta'].sum() if not put_data.empty else 0
-                            dex = ((call_oi * call_delta) + (put_oi * put_delta)) * 100 / 1_000_000
-                            row[exp_date] = round(dex, 2)
-                        else:
-                            # Fallback ohne Delta
-                            row[exp_date] = round((call_oi - put_oi) / 10000, 2)
-                    
-                    elif exposure_type == 'vanna':
-                        # VANNA EXPOSURE (VEX)
-                        if 'vanna' in calls.columns and 'vanna' in puts.columns:
-                            call_vanna = call_data['vanna'].sum() if not call_data.empty else 0
-                            put_vanna = put_data['vanna'].sum() if not put_data.empty else 0
-                            vex = ((call_oi * call_vanna) - (put_oi * put_vanna)) * 100 / 1_000_000
-                            row[exp_date] = round(vex, 2)
-                        else:
-                            # Fallback: Vanna oft nicht verfügbar in yfinance
-                            row[exp_date] = 0
-                    
-                    else:  # gamma (default)
-                        # GAMMA EXPOSURE (GEX)
-                        if 'gamma' in calls.columns and 'gamma' in puts.columns:
-                            call_gamma = call_data['gamma'].sum() if not call_data.empty else 0
-                            put_gamma = put_data['gamma'].sum() if not put_data.empty else 0
-                            gex = ((call_oi * call_gamma) - (put_oi * put_gamma)) * 100 / 1_000_000
-                            row[exp_date] = round(gex, 2)
-                        else:
-                            # Fallback ohne Gamma
-                            row[exp_date] = round((call_oi - put_oi) / 10000, 2)
-                    
-                except Exception as e:
-                    print(f"    ⚠️ Fehler bei Strike {strike}, {exp_date}: {e}")
-                    row[exp_date] = 0
-            
-            exposure_data.append(row)
-        
+            call_data = calls[calls['strike'] == strike]
+            put_data = puts[puts['strike'] == strike]
+
+            call_oi = int(call_data['openInterest'].sum()) if not call_data.empty else 0
+            put_oi = int(put_data['openInterest'].sum()) if not put_data.empty else 0
+
+            # GEX
+            if 'gamma' in calls.columns:
+                call_gamma = call_data['gamma'].sum() if not call_data.empty else 0
+                put_gamma = put_data['gamma'].sum() if not put_data.empty else 0
+                gex = round(((call_oi * call_gamma) - (put_oi * put_gamma)) * 100 / 1_000_000, 2)
+            else:
+                gex = round((call_oi - put_oi) / 10000, 2)
+
+            # DEX
+            if 'delta' in calls.columns:
+                call_delta = call_data['delta'].sum() if not call_data.empty else 0
+                put_delta = put_data['delta'].sum() if not put_data.empty else 0
+                dex = round(((call_oi * call_delta) + (put_oi * put_delta)) * 100 / 1_000_000, 2)
+            else:
+                dex = round((call_oi - put_oi) / 10000, 2)
+
+            # Vanna
+            if 'vanna' in calls.columns:
+                call_vanna = call_data['vanna'].sum() if not call_data.empty else 0
+                put_vanna = put_data['vanna'].sum() if not put_data.empty else 0
+                vex = round(((call_oi * call_vanna) - (put_oi * put_vanna)) * 100 / 1_000_000, 2)
+            else:
+                vex = 0
+
+            # Charm
+            charm = calc_charm(call_data, put_data, call_oi, put_oi, selected_dte)
+
+            exposure_data.append({
+                'strike': strike,
+                'gex': gex,
+                'dex': dex,
+                'vex': vex,
+                'charm': charm,
+                'call_oi': call_oi,
+                'put_oi': put_oi,
+            })
+
         response = {
             'ticker': ticker,
             'currentPrice': current_price,
             'data': exposure_data,
-            'dates': dates,
-            'labels': labels,
-            'timestamp': datetime.now().isoformat()
+            'selectedDte': selected_dte,
+            'expDate': exp_date,
+            'availableDtes': sorted(available_dtes.keys()),
+            'timestamp': datetime.now(pytz.timezone('US/Eastern')).isoformat(),
         }
-        
-        print(f"✅ Daten erfolgreich geladen: {len(exposure_data)} Strikes × {len(dates)} Expirations\n")
-        
+
+        print(f"✅ Fertig: {len(exposure_data)} Strikes\n")
         return jsonify(response)
-        
+
     except Exception as e:
         print(f"❌ Fehler: {e}")
         import traceback
@@ -193,15 +173,14 @@ def get_options(ticker):
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'message': 'Backend läuft!'})
+    eastern = pytz.timezone('US/Eastern')
+    now_eastern = datetime.now(eastern)
+    return jsonify({
+        'status': 'ok',
+        'server_time_utc': datetime.utcnow().isoformat(),
+        'server_time_eastern': now_eastern.isoformat(),
+        'today_eastern': get_eastern_today().isoformat(),
+    })
 
 if __name__ == '__main__':
-    print("\n" + "="*50)
-    print("🚀 Gexome Backend gestartet")
-    print("="*50)
-    print("📡 API läuft auf: http://localhost:5000")
-    print("🔍 Health Check: http://localhost:5000/health")
-    print("📊 Options API: http://localhost:5000/api/options/QQQ")
-    print("="*50 + "\n")
-    
     app.run(debug=True, port=5000)
