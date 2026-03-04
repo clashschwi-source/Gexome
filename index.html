@@ -3,307 +3,387 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gexome Heatmap - Live Data</title>
+    <title>Gexome Heatmap</title>
     <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
     <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body>
-    <div id="root"></div>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+const API_URL = 'https://gexome.onrender.com';
 
-    <script type="text/babel">
-        const { useState, useEffect, useCallback } = React;
+const GREEK_COLORS = {
+    gex:   { pos:[0,200,160], neg:[140,0,255] },
+    dex:   { pos:[20,180,255], neg:[255,80,40]  },
+    vex:   { pos:[255,200,20], neg:[100,40,220] },
+    charm: { pos:[40,220,120], neg:[220,60,100] },
+};
+const SMILE_COLORS = ['#ff4444','#ff9933','#ffdd00','#44ff88','#44ddff','#aa44ff'];
 
-        const API_URL = 'https://gexome.onrender.com';
+const getColor = (v,min,max,type) => {
+    if(!v||v===0) return 'rgb(14,14,20)';
+    const c=GREEK_COLORS[type]||GREEK_COLORS.gex;
+    const aM=Math.max(Math.abs(min),Math.abs(max),0.001);
+    const n=Math.pow(Math.min(Math.abs(v)/aM,1),0.6);
+    const col=v>0?c.pos:c.neg;
+    return `rgb(${Math.min(10+n*col[0],255)|0},${Math.min(10+n*col[1],255)|0},${Math.min(10+n*col[2],255)|0})`;
+};
+const fmt = v => {
+    if(v==null) return '';
+    const a=Math.abs(v),s=v>=0?'+':'-';
+    if(a>=1000) return `${s}$${(a/1000).toFixed(1)}B`;
+    if(a>=1)    return `${s}$${a.toFixed(1)}M`;
+    if(a>=0.001)return `${s}$${(a*1000).toFixed(0)}K`;
+    return v===0?'':s+'0';
+};
 
-        // Farben für jeden Greek-Typ
-        const GREEK_COLORS = {
-            gex:   { pos: [10, 255, 180],  neg: [160, 20, 200] },
-            dex:   { pos: [20, 180, 255],  neg: [255, 80,  40] },
-            vex:   { pos: [255, 200,  20], neg: [100, 40, 220] },
-            charm: { pos: [40, 220, 120],  neg: [220, 60, 100] },
-        };
+const GREEKS=[
+    {key:'gex',label:'GEX',title:'Gamma Exposure'},
+    {key:'dex',label:'DEX',title:'Delta Exposure'},
+    {key:'vex',label:'VEX',title:'Vanna Exposure'},
+    {key:'charm',label:'Charm',title:'Charm (Delta Decay)'},
+];
 
-        const getColor = (value, min, max, type) => {
-            if (value === undefined || value === null || value === 0) return 'rgb(14,14,20)';
-            const colors = GREEK_COLORS[type] || GREEK_COLORS.gex;
-            const absMax = Math.max(Math.abs(min), Math.abs(max), 0.001);
-            const normalized = Math.pow(Math.min(Math.abs(value) / absMax, 1), 0.6);
-            const c = value > 0 ? colors.pos : colors.neg;
-            const r = Math.round(10 + normalized * c[0]);
-            const g = Math.round(10 + normalized * c[1]);
-            const b = Math.round(10 + normalized * c[2]);
-            return `rgb(${Math.min(r,255)},${Math.min(g,255)},${Math.min(b,255)})`;
-        };
+// ─── KEY LEVELS ────────────────────────────────────────────────
+const KeyLevels = ({data, onClose}) => {
+    const rows=data.data, S=data.currentPrice;
+    let gammaFlip=null;
+    for(let i=0;i<rows.length-1;i++){
+        if((rows[i].gex<0&&rows[i+1].gex>=0)||(rows[i].gex>=0&&rows[i+1].gex<0)){
+            gammaFlip=rows[i+1].strike; break;
+        }
+    }
+    const maxCallOI=[...rows].sort((a,b)=>b.call_oi-a.call_oi)[0];
+    const maxPutOI =[...rows].sort((a,b)=>b.put_oi-a.put_oi)[0];
+    const top2gex  =[...rows].sort((a,b)=>Math.abs(b.gex)-Math.abs(a.gex)).slice(0,2);
+    const top2vex  =[...rows].sort((a,b)=>Math.abs(b.vex)-Math.abs(a.vex)).slice(0,2);
+    const top2charm=[...rows].sort((a,b)=>Math.abs(b.charm)-Math.abs(a.charm)).slice(0,2);
 
-        const fmt = (value) => {
-            if (value === undefined || value === null) return '';
-            const abs = Math.abs(value);
-            const sign = value >= 0 ? '+' : '-';
-            if (abs >= 1000) return `${sign}$${(abs/1000).toFixed(1)}B`;
-            if (abs >= 1)    return `${sign}$${abs.toFixed(1)}M`;
-            if (abs >= 0.001) return `${sign}$${(abs*1000).toFixed(0)}K`;
-            return value === 0 ? '' : `${sign}0`;
-        };
+    const R=({label,strike,extra,color})=>(
+        <div className="flex items-center justify-between py-1.5 border-b border-gray-800 last:border-0">
+            <span className="text-gray-500 text-xs">{label}</span>
+            <div className="flex items-center gap-2 text-right">
+                <span className="font-bold text-sm" style={{color}}>${strike}</span>
+                {extra&&<span className="text-xs text-gray-600">{extra}</span>}
+            </div>
+        </div>
+    );
 
-        // Datum korrekt anzeigen ohne Timezone-Verschiebung
-        const fmtDate = (dateStr) => {
-            const [y, m, d] = dateStr.split('-');
-            return `${d}.${m}`;
-        };
+    return (
+        <div className="fixed right-4 top-16 z-50 w-72 bg-gray-950 border border-gray-700 rounded-xl shadow-2xl p-5"
+             style={{fontFamily:'monospace'}}>
+            <div className="flex justify-between items-center mb-4">
+                <span className="text-yellow-400 font-bold text-sm tracking-widest">⚡ KEY LEVELS</span>
+                <button onClick={onClose} className="text-gray-600 hover:text-white text-xl leading-none px-1">×</button>
+            </div>
 
-        const GREEKS = [
-            { key: 'gex',   label: 'GEX',   title: 'Gamma Exposure' },
-            { key: 'dex',   label: 'DEX',   title: 'Delta Exposure' },
-            { key: 'vex',   label: 'VEX',   title: 'Vanna Exposure' },
-            { key: 'charm', label: 'Charm', title: 'Charm (Delta Decay)' },
-        ];
+            <Section title="Gamma Flip">
+                {gammaFlip
+                    ? <R label="GEX Nulllinie" strike={gammaFlip}
+                        color={gammaFlip>S?'#ff5555':'#44ff88'}
+                        extra={gammaFlip>S?'▲ über Spot':'▼ unter Spot'} />
+                    : <p className="text-gray-700 text-xs py-1">Kein Flip im Bereich</p>}
+            </Section>
 
-        const OptionsHeatmap = () => {
-            const [ticker, setTicker]           = useState('QQQ');
-            const [inputTicker, setInputTicker] = useState('QQQ');
-            const [selectedDte, setSelectedDte] = useState(0);
-            const [strikes, setStrikes]         = useState(50);
-            const [loading, setLoading]         = useState(false);
-            const [error, setError]             = useState(null);
-            const [data, setData]               = useState(null);
+            <Section title="OI Wände">
+                <R label="Call Wall (max OI)" strike={maxCallOI?.strike} color="#44ff88" extra={maxCallOI?.call_oi?.toLocaleString()+' OI'}/>
+                <R label="Put Wall (max OI)"  strike={maxPutOI?.strike}  color="#ff5555" extra={maxPutOI?.put_oi?.toLocaleString()+' OI'}/>
+            </Section>
 
-            const loadData = useCallback(async (tkr, dte) => {
-                setLoading(true);
-                setError(null);
-                try {
-                    const res = await fetch(`${API_URL}/api/options/${tkr}?strikes=${strikes}&dte=${dte}`);
-                    if (!res.ok) {
-                        const err = await res.json();
-                        throw new Error(err.error || 'Backend Fehler');
-                    }
-                    const json = await res.json();
-                    setData(json);
-                    // Falls gewähltes DTE nicht verfügbar war, aktualisieren
-                    if (json.selectedDte !== dte) setSelectedDte(json.selectedDte);
-                } catch (e) {
-                    setError(e.message);
-                } finally {
-                    setLoading(false);
-                }
-            }, [strikes]);
+            <Section title="Stärkste GEX Level">
+                {top2gex.map((r,i)=><R key={i} label={`#${i+1} ${r.gex>=0?'Long Gamma':'Short Gamma'}`}
+                    strike={r.strike} color={r.gex>=0?'#0affb4':'#c014d0'} extra={fmt(r.gex)}/>)}
+            </Section>
 
-            useEffect(() => {
-                loadData(ticker, selectedDte);
-                const iv = setInterval(() => loadData(ticker, selectedDte), 60000);
-                return () => clearInterval(iv);
-            }, [ticker, selectedDte, loadData]);
+            <Section title="Stärkste VEX Level">
+                {top2vex.map((r,i)=><R key={i} label={`#${i+1} Vanna`}
+                    strike={r.strike} color={r.vex>=0?'#ffc814':'#6428dc'} extra={fmt(r.vex)}/>)}
+            </Section>
 
-            const handleTickerSubmit = (e) => {
-                e.preventDefault();
-                const t = inputTicker.trim().toUpperCase();
-                if (t) { setTicker(t); }
-            };
+            <Section title="Stärkste Charm Level">
+                {top2charm.map((r,i)=><R key={i} label={`#${i+1} Charm`}
+                    strike={r.strike} color={r.charm>=0?'#28dc78':'#dc3c64'} extra={fmt(r.charm)}/>)}
+            </Section>
+        </div>
+    );
+};
 
-            // Min/Max pro Greek
-            const ranges = {};
-            if (data) {
-                GREEKS.forEach(({ key }) => {
-                    const vals = data.data.map(r => r[key]).filter(v => v !== 0 && v !== undefined);
-                    ranges[key] = {
-                        min: vals.length ? Math.min(...vals) : -1,
-                        max: vals.length ? Math.max(...vals) :  1,
-                    };
-                });
-            }
+const Section = ({title,children}) => (
+    <div className="mb-4">
+        <div className="text-gray-600 text-xs uppercase tracking-wider mb-1.5">{title}</div>
+        {children}
+    </div>
+);
 
-            const currentPrice = data?.currentPrice;
-            const closestStrike = data ? data.data.reduce((prev, curr) =>
-                Math.abs(curr.strike - currentPrice) < Math.abs(prev.strike - currentPrice) ? curr : prev
-            ) : null;
+// ─── VOL SMILE ─────────────────────────────────────────────────
+const VolSmile = ({ticker}) => {
+    const [sd,setSd]=useState(null), [loading,setLoading]=useState(false);
+    const ref=useRef(null);
 
-            return (
-                <div className="h-screen bg-black text-white flex flex-col overflow-hidden" style={{fontFamily:'monospace'}}>
+    const load=useCallback(async()=>{
+        setLoading(true);
+        try{ const r=await fetch(`${API_URL}/api/smile/${ticker}`); setSd(await r.json()); }
+        catch(e){} finally{setLoading(false);}
+    },[ticker]);
 
-                    {/* ── HEADER ── */}
-                    <div className="flex-none px-6 py-3 border-b border-gray-800 bg-gray-950">
-                        <div className="flex items-center justify-between flex-wrap gap-3">
-                            <h1 className="text-2xl font-bold tracking-widest text-white">GEXOME</h1>
+    useEffect(()=>{load();},[load]);
 
-                            {/* Ticker */}
-                            <form onSubmit={handleTickerSubmit} className="flex items-center gap-2">
-                                <input
-                                    type="text"
-                                    value={inputTicker}
-                                    onChange={e => setInputTicker(e.target.value.toUpperCase())}
-                                    className="bg-black border border-gray-600 rounded px-3 py-1.5 w-24 text-white text-sm uppercase"
-                                    placeholder="Ticker"
-                                />
-                                <button type="submit" className="bg-green-700 hover:bg-green-600 px-3 py-1.5 rounded text-sm">
-                                    Laden
-                                </button>
-                            </form>
+    useEffect(()=>{
+        if(!sd||!ref.current) return;
+        const cv=ref.current, ctx=cv.getContext('2d');
+        const W=cv.width, H=cv.height, P={t:35,r:20,b:55,l:58};
+        ctx.clearRect(0,0,W,H); ctx.fillStyle='#090b14'; ctx.fillRect(0,0,W,H);
+        const series=sd.series;
+        if(!series?.length) return;
+        const allIV=series.flatMap(s=>s.points.map(p=>p.iv));
+        const allS=series.flatMap(s=>s.points.map(p=>p.strike));
+        if(!allIV.length) return;
+        const minIV=Math.max(0,Math.min(...allIV)-2), maxIV=Math.max(...allIV)+3;
+        const minS=Math.min(...allS), maxS=Math.max(...allS), S=sd.currentPrice;
+        const toX=s=>P.l+(s-minS)/(maxS-minS)*(W-P.l-P.r);
+        const toY=iv=>H-P.b-(iv-minIV)/(maxIV-minIV)*(H-P.t-P.b);
 
-                            {/* DTE Selector */}
-                            <div className="flex items-center gap-2">
-                                <span className="text-gray-400 text-sm">DTE:</span>
-                                <div className="flex gap-1">
-                                    {(data?.availableDtes || [0,1,2,3,4]).map(dte => (
-                                        <button
-                                            key={dte}
-                                            onClick={() => setSelectedDte(dte)}
-                                            className={`px-3 py-1.5 rounded text-sm font-bold transition-all ${
-                                                selectedDte === dte
-                                                    ? 'bg-cyan-600 text-white'
-                                                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-                                            }`}
-                                        >
-                                            {dte}DTE
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
+        // Grid
+        ctx.lineWidth=1;
+        for(let i=0;i<=5;i++){
+            const iv=minIV+(maxIV-minIV)*i/5, y=toY(iv);
+            ctx.strokeStyle='#1a2040'; ctx.beginPath(); ctx.moveTo(P.l,y); ctx.lineTo(W-P.r,y); ctx.stroke();
+            ctx.fillStyle='#4a5680'; ctx.font='10px monospace'; ctx.textAlign='right';
+            ctx.fillText(iv.toFixed(1)+'%',P.l-5,y+4);
+        }
+        for(let i=0;i<=6;i++){
+            const s=minS+(maxS-minS)*i/6, x=toX(s);
+            ctx.fillStyle='#4a5680'; ctx.font='9px monospace'; ctx.textAlign='center';
+            ctx.fillText('$'+Math.round(s),x,H-P.b+18);
+        }
 
-                            {/* Strikes */}
-                            <div className="flex items-center gap-2">
-                                <span className="text-gray-400 text-sm">Strikes:</span>
-                                <select
-                                    value={strikes}
-                                    onChange={e => setStrikes(Number(e.target.value))}
-                                    className="bg-black border border-gray-600 rounded px-2 py-1.5 text-sm text-white"
-                                >
-                                    {[30, 50, 80, 100].map(n => (
-                                        <option key={n} value={n}>{n}</option>
-                                    ))}
-                                </select>
-                            </div>
+        // Spot
+        const sx=toX(S);
+        ctx.strokeStyle='#ffdd00'; ctx.lineWidth=1.5; ctx.setLineDash([5,4]);
+        ctx.beginPath(); ctx.moveTo(sx,P.t); ctx.lineTo(sx,H-P.b); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle='#ffdd00'; ctx.font='bold 10px monospace'; ctx.textAlign='center';
+        ctx.fillText('SPOT $'+(S?.toFixed(0)),sx,H-P.b+32);
 
-                            {/* Refresh */}
-                            <button
-                                onClick={() => loadData(ticker, selectedDte)}
-                                disabled={loading}
-                                className="bg-blue-700 hover:bg-blue-600 disabled:opacity-40 px-3 py-1.5 rounded text-sm"
-                            >
-                                {loading ? '⏳' : '🔄'} Refresh
-                            </button>
+        // Series
+        series.forEach((s,i)=>{
+            const color=SMILE_COLORS[i%SMILE_COLORS.length];
+            if(s.points.length<2) return;
+            ctx.strokeStyle=color; ctx.lineWidth=2;
+            ctx.beginPath();
+            s.points.forEach((p,j)=>{ const x=toX(p.strike),y=toY(p.iv); j===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+            ctx.stroke();
+            ctx.fillStyle=color;
+            s.points.forEach(p=>{ ctx.beginPath(); ctx.arc(toX(p.strike),toY(p.iv),2.5,0,Math.PI*2); ctx.fill(); });
+        });
+
+        ctx.fillStyle='#606880'; ctx.font='bold 11px monospace'; ctx.textAlign='left';
+        ctx.fillText(sd.ticker+' · Volatility Smile · 0-5 DTE',P.l,20);
+    },[sd]);
+
+    return (
+        <div className="mx-6 mb-8 mt-6 bg-gray-950 border border-gray-800 rounded-xl p-5">
+            <div className="flex justify-between items-center mb-4">
+                <span className="text-cyan-400 font-bold text-sm tracking-widest" style={{fontFamily:'monospace'}}>
+                    📈 VOLATILITY SMILE / SKEW
+                </span>
+                <button onClick={load} disabled={loading}
+                    className="text-xs bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded text-gray-400 disabled:opacity-40">
+                    {loading?'⏳':'🔄'} Refresh
+                </button>
+            </div>
+            {loading&&!sd&&<div className="text-center text-gray-600 py-10">⏳ Lade Vol Smile…</div>}
+            {sd&&<>
+                <canvas ref={ref} width={920} height={340} className="w-full rounded-lg"/>
+                <div className="flex flex-wrap gap-5 mt-3">
+                    {sd.series.map((s,i)=>(
+                        <div key={i} className="flex items-center gap-2 text-xs" style={{fontFamily:'monospace'}}>
+                            <div style={{width:18,height:3,backgroundColor:SMILE_COLORS[i%SMILE_COLORS.length],borderRadius:2}}/>
+                            <span style={{color:SMILE_COLORS[i%SMILE_COLORS.length]}}>{s.label}</span>
+                            <span className="text-gray-700">{s.expDate}</span>
                         </div>
+                    ))}
+                </div>
+            </>}
+        </div>
+    );
+};
 
-                        {/* Status Bar */}
-                        {data && (
-                            <div className="flex items-center gap-6 mt-2 text-xs text-gray-500">
-                                <span className="text-white font-bold text-base">{data.ticker} ${data.currentPrice?.toFixed(2)}</span>
-                                <span>Expiry: <span className="text-cyan-400">{data.expDate} ({data.selectedDte}DTE)</span></span>
-                                <span>Update: {new Date(data.timestamp).toLocaleTimeString('de-DE')}</span>
-                                <span className="text-yellow-500">⏱ Auto-Refresh 60s</span>
-                                {error && <span className="text-red-400">⚠️ {error}</span>}
-                            </div>
-                        )}
-                        {!data && error && (
-                            <div className="mt-2 text-red-400 text-sm">❌ {error}</div>
-                        )}
+// ─── APP ───────────────────────────────────────────────────────
+const App = () => {
+    const [ticker,setTicker]=useState('QQQ'), [input,setInput]=useState('QQQ');
+    const [dte,setDte]=useState(0), [strikes,setStrikes]=useState(50);
+    const [loading,setLoading]=useState(false), [error,setError]=useState(null);
+    const [data,setData]=useState(null), [showKL,setShowKL]=useState(false);
+
+    const load=useCallback(async(tkr,d)=>{
+        setLoading(true); setError(null);
+        try{
+            const r=await fetch(`${API_URL}/api/options/${tkr}?strikes=${strikes}&dte=${d}`);
+            if(!r.ok){const e=await r.json(); throw new Error(e.error||'Fehler');}
+            const j=await r.json(); setData(j);
+            if(j.selectedDte!==d) setDte(j.selectedDte);
+        }catch(e){setError(e.message);}
+        finally{setLoading(false);}
+    },[strikes]);
+
+    useEffect(()=>{
+        load(ticker,dte);
+        const iv=setInterval(()=>load(ticker,dte),60000);
+        return()=>clearInterval(iv);
+    },[ticker,dte,load]);
+
+    const ranges={};
+    if(data) GREEKS.forEach(({key})=>{
+        const v=data.data.map(r=>r[key]).filter(v=>v!==0&&v!=null);
+        ranges[key]={min:v.length?Math.min(...v):-1,max:v.length?Math.max(...v):1};
+    });
+    const S=data?.currentPrice;
+    const closest=data?data.data.reduce((p,c)=>Math.abs(c.strike-S)<Math.abs(p.strike-S)?c:p):null;
+
+    return (
+        <div className="bg-black text-white min-h-screen" style={{fontFamily:'monospace'}}>
+
+            <div className="sticky top-0 z-40 px-6 py-3 border-b border-gray-800 bg-gray-950">
+                <div className="flex items-center flex-wrap gap-3 justify-between">
+                    <h1 className="text-2xl font-bold tracking-widest">GEXOME</h1>
+
+                    <form onSubmit={e=>{e.preventDefault();const t=input.trim().toUpperCase();if(t)setTicker(t)}}
+                        className="flex items-center gap-2">
+                        <input value={input} onChange={e=>setInput(e.target.value.toUpperCase())}
+                            className="bg-black border border-gray-600 rounded px-3 py-1.5 w-24 text-sm uppercase text-white" placeholder="Ticker"/>
+                        <button type="submit" className="bg-green-700 hover:bg-green-600 px-3 py-1.5 rounded text-sm">Laden</button>
+                    </form>
+
+                    <div className="flex items-center gap-2">
+                        <span className="text-gray-400 text-sm">DTE:</span>
+                        {(data?.availableDtes||[0,1,2,3,4]).map(d=>(
+                            <button key={d} onClick={()=>setDte(d)}
+                                className={`px-3 py-1.5 rounded text-sm font-bold ${dte===d?'bg-cyan-600 text-white':'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                                {d}DTE</button>
+                        ))}
                     </div>
 
-                    {/* ── LOADING ── */}
-                    {loading && !data && (
-                        <div className="flex-1 flex items-center justify-center text-gray-400">
-                            <div className="text-center">
-                                <div className="text-3xl mb-3">⏳</div>
-                                <div>Lade Live-Daten von Yahoo Finance...</div>
-                                <div className="text-xs mt-1 text-gray-600">Kann 10-20s dauern (Free Tier)</div>
-                            </div>
-                        </div>
-                    )}
+                    <select value={strikes} onChange={e=>setStrikes(Number(e.target.value))}
+                        className="bg-black border border-gray-600 rounded px-2 py-1.5 text-sm text-white">
+                        {[30,50,80,100].map(n=><option key={n} value={n}>{n} Strikes</option>)}
+                    </select>
 
-                    {/* ── TABLE ── */}
-                    {data && (
-                        <div className="flex-1 overflow-auto">
-                            <table className="border-collapse text-xs" style={{minWidth:'600px', width:'100%'}}>
-                                <thead className="sticky top-0 z-20">
-                                    <tr>
-                                        {/* Strike header */}
-                                        <th className="sticky left-0 z-30 bg-gray-900 border-r border-gray-700 px-3 py-2 text-left text-gray-400 w-16">
-                                            Strike
-                                        </th>
-                                        {/* Greek headers */}
-                                        {GREEKS.map(({ key, label, title }) => (
-                                            <th key={key} className="bg-gray-900 border-r border-gray-800 px-3 py-2 text-center" title={title}>
-                                                <span style={{color: `rgb(${GREEK_COLORS[key].pos.join(',')})`}}>{label}</span>
-                                                <div className="text-gray-600 font-normal text-xs">{title}</div>
-                                            </th>
-                                        ))}
-                                        {/* OI */}
-                                        <th className="bg-gray-900 border-r border-gray-800 px-3 py-2 text-center text-gray-400">
-                                            Call OI
-                                        </th>
-                                        <th className="bg-gray-900 px-3 py-2 text-center text-gray-400">
-                                            Put OI
-                                        </th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {data.data.map((row, idx) => {
-                                        const isCurrent = closestStrike && row.strike === closestStrike.strike;
-                                        return (
-                                            <tr
-                                                key={idx}
-                                                className={isCurrent ? 'outline outline-2 outline-yellow-400' : 'border-t border-gray-900'}
-                                            >
-                                                {/* Strike */}
-                                                <td className={`sticky left-0 z-10 px-3 py-1 text-right border-r border-gray-800 ${
-                                                    isCurrent
-                                                        ? 'bg-yellow-900 text-yellow-300 font-bold'
-                                                        : 'bg-black text-gray-300'
-                                                }`}>
-                                                    {row.strike}
-                                                </td>
-
-                                                {/* Greek cells */}
-                                                {GREEKS.map(({ key }) => {
-                                                    const val = row[key];
-                                                    const { min, max } = ranges[key] || { min: -1, max: 1 };
-                                                    return (
-                                                        <td
-                                                            key={key}
-                                                            className="px-2 py-1 text-center border-r border-gray-900 font-mono"
-                                                            style={{ backgroundColor: getColor(val, min, max, key) }}
-                                                            title={`${key.toUpperCase()}: ${val}`}
-                                                        >
-                                                            {fmt(val)}
-                                                        </td>
-                                                    );
-                                                })}
-
-                                                {/* OI */}
-                                                <td className="px-2 py-1 text-center text-green-700 border-r border-gray-900">
-                                                    {row.call_oi?.toLocaleString()}
-                                                </td>
-                                                <td className="px-2 py-1 text-center text-purple-700">
-                                                    {row.put_oi?.toLocaleString()}
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-
-                    {/* ── LEGEND ── */}
-                    <div className="flex-none border-t border-gray-800 bg-gray-950 px-6 py-2 flex items-center gap-8 text-xs text-gray-500 flex-wrap">
-                        {GREEKS.map(({ key, label, title }) => (
-                            <div key={key} className="flex items-center gap-2">
-                                <div className="flex gap-1">
-                                    <div className="w-4 h-4 rounded" style={{backgroundColor:`rgb(${GREEK_COLORS[key].pos.join(',')})`}}></div>
-                                    <div className="w-4 h-4 rounded" style={{backgroundColor:`rgb(${GREEK_COLORS[key].neg.join(',')})`}}></div>
-                                </div>
-                                <span>{label} = {title}</span>
-                            </div>
-                        ))}
-                        <span className="ml-auto">made Gexome| Yahoo Finance (15-20min delay)</span>
+                    <div className="flex gap-2">
+                        <button onClick={()=>setShowKL(v=>!v)}
+                            className={`px-4 py-1.5 rounded text-sm font-bold border transition-all ${showKL?'bg-yellow-500 border-yellow-400 text-black':'border-yellow-600 text-yellow-400 hover:bg-yellow-600 hover:text-black'}`}>
+                            ⚡ Key Levels
+                        </button>
+                        <button onClick={()=>load(ticker,dte)} disabled={loading}
+                            className="bg-blue-700 hover:bg-blue-600 disabled:opacity-40 px-3 py-1.5 rounded text-sm">
+                            {loading?'⏳':'🔄'}
+                        </button>
                     </div>
                 </div>
-            );
-        };
+                {data&&<div className="flex gap-5 mt-1.5 text-xs text-gray-500 flex-wrap items-center">
+                    <span className="text-white font-bold">{data.ticker} ${data.currentPrice?.toFixed(2)}</span>
+                    <span>Expiry: <span className="text-cyan-400">{data.expDate} ({data.selectedDte}DTE)</span></span>
+                    <span>{new Date(data.timestamp).toLocaleTimeString('de-DE')}</span>
+                    <span className="text-yellow-600">⏱ 60s</span>
+                    {error&&<span className="text-red-400">⚠️ {error}</span>}
+                    {/* REGIME INDICATOR */}
+                    {(()=>{
+                        const rows=data.data, S=data.currentPrice;
+                        let flip=null;
+                        for(let i=0;i<rows.length-1;i++){
+                            if((rows[i].gex<0&&rows[i+1].gex>=0)||(rows[i].gex>=0&&rows[i+1].gex<0)){
+                                flip=rows[i+1].strike; break;
+                            }
+                        }
+                        if(!flip) return null;
+                        const positive = S > flip;
+                        return (
+                            <div className="ml-auto flex items-center gap-2 px-4 py-1 rounded-full border"
+                                style={{
+                                    backgroundColor: positive ? 'rgba(0,200,160,0.12)' : 'rgba(140,0,255,0.15)',
+                                    borderColor: positive ? 'rgba(0,200,160,0.5)' : 'rgba(140,0,255,0.5)',
+                                }}>
+                                <div className="w-2 h-2 rounded-full animate-pulse"
+                                    style={{backgroundColor: positive ? 'rgb(0,200,160)' : 'rgb(140,0,255)'}}/>
+                                <span className="font-bold tracking-wider text-xs"
+                                    style={{color: positive ? 'rgb(0,200,160)' : 'rgb(160,80,255)'}}>
+                                    {positive ? '▲ LONG GAMMA' : '▼ SHORT GAMMA'}
+                                </span>
+                                <span className="text-gray-600">Flip @ ${flip}</span>
+                            </div>
+                        );
+                    })()}
+                </div>}
+            </div>
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<OptionsHeatmap />);
-    </script>
+            {showKL&&data&&<KeyLevels data={data} onClose={()=>setShowKL(false)}/>}
+
+            {loading&&!data&&<div className="flex justify-center items-center h-64 text-gray-600">
+                <div className="text-center"><div className="text-4xl mb-3">⏳</div>Lade Daten…</div>
+            </div>}
+
+            {data&&<>
+                <div className="overflow-x-auto">
+                    <table className="border-collapse text-xs w-full">
+                        <thead className="sticky top-[57px] z-20">
+                            <tr>
+                                <th className="sticky left-0 z-30 bg-gray-900 border-r border-gray-700 px-3 py-2 text-left text-gray-400 w-16">Strike</th>
+                                {GREEKS.map(({key,label,title})=>(
+                                    <th key={key} className="bg-gray-900 border-r border-gray-800 px-3 py-2 text-center" title={title}>
+                                        <span style={{color:`rgb(${GREEK_COLORS[key].pos.join(',')})`}}>{label}</span>
+                                        <div className="text-gray-600 text-xs font-normal">{title}</div>
+                                    </th>
+                                ))}
+                                <th className="bg-gray-900 border-r border-gray-800 px-2 py-2 text-center text-gray-500 text-xs">Mid IV</th>
+                                <th className="bg-gray-900 border-r border-gray-800 px-2 py-2 text-center text-gray-500 text-xs">Call OI</th>
+                                <th className="bg-gray-900 px-2 py-2 text-center text-gray-500 text-xs">Put OI</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {data.data.map((row,i)=>{
+                                const iC=closest&&row.strike===closest.strike;
+                                return <tr key={i} className={iC?'outline outline-2 outline-yellow-400':'border-t border-gray-900'}>
+                                    <td className={`sticky left-0 z-10 px-3 py-1 text-right border-r border-gray-800 ${iC?'bg-yellow-900 text-yellow-300 font-bold':'bg-black text-gray-300'}`}>
+                                        {row.strike}
+                                    </td>
+                                    {GREEKS.map(({key})=>{
+                                        const v=row[key];
+                                        const {min,max}=ranges[key]||{min:-1,max:1};
+                                        return <td key={key} className="px-2 py-1 text-center border-r border-gray-900"
+                                            style={{backgroundColor:getColor(v,min,max,key)}} title={`${key}: ${v}`}>
+                                            {fmt(v)}
+                                        </td>;
+                                    })}
+                                    <td className="px-2 py-1 text-center text-gray-600 border-r border-gray-900">
+                                        {row.mid_iv?(row.mid_iv*100).toFixed(1)+'%':''}
+                                    </td>
+                                    <td className="px-2 py-1 text-center text-green-800 border-r border-gray-900">{row.call_oi?.toLocaleString()}</td>
+                                    <td className="px-2 py-1 text-center text-purple-800">{row.put_oi?.toLocaleString()}</td>
+                                </tr>;
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+                <VolSmile ticker={ticker}/>
+            </>}
+
+            <div className="border-t border-gray-800 bg-gray-950 px-6 py-2 flex items-center gap-5 text-xs text-gray-600 flex-wrap">
+                {GREEKS.map(({key,label,title})=>(
+                    <div key={key} className="flex items-center gap-1.5">
+                        <div className="w-3 h-3 rounded" style={{backgroundColor:`rgb(${GREEK_COLORS[key].pos.join(',')})`}}/>
+                        <div className="w-3 h-3 rounded" style={{backgroundColor:`rgb(${GREEK_COLORS[key].neg.join(',')})`}}/>
+                        <span>{label}={title}</span>
+                    </div>
+                ))}
+                <span className="ml-auto">Yahoo Finance · 15-20min delay</span>
+            </div>
+        </div>
+    );
+};
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
 </body>
 </html>
-
