@@ -158,20 +158,19 @@ const VolSmile = ({ticker}) => {
         const series=sd.series;
         if(!series?.length) return;
 
-        // ── IQR Outlier-Filter pro Serie ──────────────────────────
-        // Entfernt Yahoo-Garbage (tief OTM spikes) bevor die Achse berechnet wird
-        const iqrFilter = (points) => {
-            if(points.length < 4) return points;
-            const sorted = [...points].sort((a,b)=>a.iv-b.iv);
-            const q1 = sorted[Math.floor(sorted.length*0.25)].iv;
-            const q3 = sorted[Math.floor(sorted.length*0.75)].iv;
-            const iqr = q3-q1;
-            const lo = q1 - iqr*2.5;
-            const hi = q3 + iqr*2.5;
+        // ── Median-basierter Outlier-Filter pro Serie ─────────────
+        // Strenger als IQR: entfernt alles > median*2.0 oder > median+25pp
+        // Verhindert 0DTE Yahoo-Spikes die Y-Achse auf 0-100% strecken
+        const medianFilter = (points) => {
+            if(points.length < 3) return points;
+            const ivs = [...points].map(p=>p.iv).sort((a,b)=>a-b);
+            const med = ivs[Math.floor(ivs.length/2)];
+            const hi = Math.min(med * 2.0, med + 25);
+            const lo = Math.max(med * 0.4, med - 25);
             return points.filter(p=>p.iv>=lo && p.iv<=hi);
         };
 
-        const cleanSeries = series.map(s=>({...s, points: iqrFilter(s.points)}))
+        const cleanSeries = series.map(s=>({...s, points: medianFilter(s.points)}))
                                   .filter(s=>s.points.length>=2);
         if(!cleanSeries.length) return;
 
@@ -236,7 +235,7 @@ const VolSmile = ({ticker}) => {
     },[sd]);
 
     return (
-        <div className="mx-6 mb-8 mt-6 bg-gray-950 border border-gray-800 rounded-xl p-5">
+        <div className="mx-16 my-8 bg-gray-950 border border-gray-800 rounded-xl p-5" style={{maxWidth:'860px', margin:'2rem auto'}}>
             <div className="flex justify-between items-center mb-4">
                 <span className="text-cyan-400 font-bold text-sm tracking-widest" style={{fontFamily:'monospace'}}>
                     📈 VOLATILITY SMILE / SKEW
