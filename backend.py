@@ -27,49 +27,58 @@ def get_options(ticker):
         
         print(f"✅ Aktueller Preis: ${current_price}")
         
-        # Hole nur 0DTE, 1DTE, 2DTE Expirations
+        # Hole alle Expirations
         all_expirations = stock.options
         
         if not all_expirations:
             return jsonify({'error': 'Keine Options-Daten verfügbar'}), 404
         
-        # Sammle alle Expirations mit DTE
-        today = datetime.now()
-        exp_with_dte = []
+        # Suche GENAU 0DTE, 1DTE, 2DTE, 3DTE, 4DTE
+        today = datetime.now().date()
+        target_dtes = {0, 1, 2, 3, 4}
+        dte_map = {}  # DTE -> Expiration Date
         
-        for exp_date in all_expirations[:15]:
-            exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d')
+        for exp_date in all_expirations[:30]:  # Prüfe mehr Expirations
+            exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d').date()
             dte = (exp_datetime - today).days
             
-            if dte >= 0:  # Nur zukünftige Expirations
-                exp_with_dte.append({
-                    'date': exp_date,
-                    'dte': dte
-                })
+            if dte in target_dtes and dte not in dte_map:
+                dte_map[dte] = exp_date
+                print(f"  ✅ Gefunden: {exp_date} ({dte}DTE)")
         
-        # Sortiere nach DTE (aufsteigend: 0, 1, 2, ...)
-        exp_with_dte.sort(key=lambda x: x['dte'])
-        
-        # Nimm die ersten 3 (0DTE, 1DTE, 2DTE)
+        # Sortiere nach DTE und erstelle finale Liste
         expirations = []
-        for item in exp_with_dte[:3]:
-            expirations.append(item['date'])
-            print(f"  ✅ Gefunden: {item['date']} ({item['dte']}DTE)")
+        for dte in sorted(dte_map.keys()):
+            expirations.append(dte_map[dte])
         
         if not expirations:
-            return jsonify({'error': 'Keine Options verfügbar'}), 404
+            return jsonify({'error': f'Keine 0-4 DTE Expirations gefunden. Verfügbare DTEs: {sorted(set((datetime.strptime(d, "%Y-%m-%d").date() - today).days for d in all_expirations[:30]))}'}), 404
         
-        # Generiere Strike Range mit variablem Step
-        strike_range = num_strikes * strike_step / 2
-        strikes = np.arange(
-            current_price - strike_range,
-            current_price + strike_range + strike_step,
-            strike_step
-        )
-        # Runde auf ganze Zahlen
-        strikes = [int(round(s)) for s in strikes]
+        # Hole verfügbare Strikes von der ersten Expiration
+        first_exp = expirations[0]
+        opt_sample = stock.option_chain(first_exp)
         
-        print(f"✅ Strikes generiert: {len(strikes)} Strikes von {min(strikes)} bis {max(strikes)}")
+        # Extrahiere alle verfügbaren Strikes
+        available_strikes = sorted(set(
+            list(opt_sample.calls['strike'].unique()) + 
+            list(opt_sample.puts['strike'].unique())
+        ))
+        
+        # Filtere Strikes um den aktuellen Preis herum
+        strike_range_count = num_strikes // 2
+        
+        # Finde nächsten Strike zum aktuellen Preis
+        closest_strike = min(available_strikes, key=lambda x: abs(x - current_price))
+        closest_idx = available_strikes.index(closest_strike)
+        
+        # Nimm Strikes um den aktuellen Preis
+        start_idx = max(0, closest_idx - strike_range_count)
+        end_idx = min(len(available_strikes), closest_idx + strike_range_count + 1)
+        
+        strikes = [int(round(s)) for s in available_strikes[start_idx:end_idx]]
+        
+        print(f"✅ Verfügbare Strikes von Yahoo: {len(available_strikes)} total")
+        print(f"✅ Gewählte Strikes: {len(strikes)} von {min(strikes)} bis {max(strikes)}")
         
         # Sammle Exposure Daten - OPTIMIERT: Nur 1x pro Expiration laden!
         exposure_data = []
@@ -87,8 +96,8 @@ def get_options(ticker):
                 }
                 
                 # Berechne DTE (Days to Expiration)
-                exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d')
-                dte = (exp_datetime - datetime.now()).days
+                exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d').date()
+                dte = (exp_datetime - datetime.now().date()).days
                 
                 dates.append(exp_date)
                 labels.append(f"{dte}DTE")
@@ -100,7 +109,7 @@ def get_options(ticker):
                 continue
         
         if not dates:
-            return jsonify({'error': 'Keine gültigen 0-2 DTE Expirations gefunden'}), 404
+            return jsonify({'error': 'Keine gültigen 0-4 DTE Expirations gefunden'}), 404
         
         # Erstelle Exposure Matrix - verwende gecachte Daten
         for strike in strikes:
@@ -196,4 +205,3 @@ if __name__ == '__main__':
     print("="*50 + "\n")
     
     app.run(debug=True, port=5000)
-    
