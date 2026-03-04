@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gexome Heatmap - Live Data</title>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            zoom: 1.0;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const OptionsHeatmap = () => {
+          const [ticker, setTicker] = useState('QQQ');
+          const [inputTicker, setInputTicker] = useState('QQQ');
+          const [exposure, setExposure] = useState('gamma');
+          const [strikes, setStrikes] = useState(50);
+          const [loading, setLoading] = useState(false);
+          const [error, setError] = useState(null);
+          const [heatmapData, setHeatmapData] = useState(null);
+          const [currentPrice, setCurrentPrice] = useState(null);
+
+          const API_URL = 'http://localhost:5000';
+
+          const handleTickerSubmit = (e) => {
+            e.preventDefault();
+            setTicker(inputTicker.toUpperCase());
+          };
+
+          const fetchLiveData = async (tickerSymbol) => {
+            try {
+              // NDX bekommt 5er Schritte, alle anderen 1er Schritte
+              const strikeStep = tickerSymbol === 'NDX' ? 5 : 1;
+              const response = await fetch(`${API_URL}/api/options/${tickerSymbol}?strikes=${strikes}&strike_step=${strikeStep}&exposure=${exposure}`);
+              if (!response.ok) throw new Error('Backend nicht erreichbar');
+              const data = await response.json();
+              return data;
+            } catch (err) {
+              console.error('❌ Live data fetch failed:', err);
+              throw err;
+            }
+          };
+
+          const loadData = async () => {
+            setLoading(true);
+            setError(null);
+            
+            try {
+              console.log(`📡 Lade Live-Daten für ${ticker}...`);
+              const data = await fetchLiveData(ticker);
+              console.log('✅ Live-Daten erfolgreich geladen');
+              
+              setHeatmapData(data);
+              setCurrentPrice(data.currentPrice);
+            } catch (err) {
+              console.error('❌ Fehler beim Laden:', err);
+              setError('Backend nicht erreichbar! Starte: python backend.py');
+            } finally {
+              setLoading(false);
+            }
+          };
+
+          useEffect(() => {
+            loadData();
+            
+            const interval = setInterval(() => {
+              console.log('🔄 Auto-Update: Lade neue Daten...');
+              loadData();
+            }, 60000); // 60s statt 30s
+            
+            return () => clearInterval(interval);
+          }, [ticker, strikes, exposure]);
+
+          const getColorForValue = (value, min, max) => {
+            if (!value) return 'rgb(18, 18, 25)';
+            
+            const absMax = Math.max(Math.abs(min), Math.abs(max));
+            const normalized = Math.abs(value) / absMax;
+            
+            if (value > 0) {
+              const intensity = Math.pow(normalized, 0.7);
+              const r = Math.round(10 + intensity * 50);
+              const g = Math.round(80 + intensity * 175);
+              const b = Math.round(120 + intensity * 135);
+              return `rgb(${r}, ${g}, ${b})`;
+            } else {
+              const intensity = Math.pow(normalized, 0.7);
+              const r = Math.round(30 + intensity * 130);
+              const g = Math.round(15 + intensity * 45);
+              const b = Math.round(60 + intensity * 140);
+              return `rgb(${r}, ${g}, ${b})`;
+            }
+          };
+
+          const formatValue = (value) => {
+            if (!value) return '';
+            const absValue = Math.abs(value);
+            const sign = value >= 0 ? '+' : '-';
+            
+            if (absValue >= 1000) {
+              return `${sign}$${(absValue / 1000).toFixed(1)}B`;
+            } else if (absValue >= 1) {
+              return `${sign}$${absValue.toFixed(1)}M`;
+            } else {
+              return `${sign}$${(absValue * 1000).toFixed(0)}K`;
+            }
+          };
+
+          if (loading && !heatmapData) {
+            return (
+              <div className="flex items-center justify-center h-screen bg-black text-white">
+                <div className="text-center">
+                  <div className="text-2xl mb-4">⏳ Lädt Live-Daten...</div>
+                  <div className="text-sm text-gray-400">Hole Daten von Yahoo Finance</div>
+                </div>
+              </div>
+            );
+          }
+
+          if (error && !heatmapData) {
+            return (
+              <div className="flex items-center justify-center h-screen bg-black text-white">
+                <div className="text-center max-w-md">
+                  <div className="text-2xl mb-4">❌ Backend nicht erreichbar</div>
+                  <div className="text-gray-400 mb-4">{error}</div>
+                  <div className="bg-gray-800 p-4 rounded text-left text-sm">
+                    <div className="text-yellow-400 mb-2">Starte das Backend:</div>
+                    <code className="text-green-400">python backend.py</code>
+                  </div>
+                  <button
+                    onClick={loadData}
+                    className="mt-4 bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded"
+                  >
+                    🔄 Erneut versuchen
+                  </button>
+                </div>
+              </div>
+            );
+          }
+
+          if (!heatmapData) return null;
+
+          const allValues = heatmapData.data.flatMap(row => 
+            heatmapData.dates.map(date => row[date])
+          ).filter(v => v !== undefined);
+          const minValue = Math.min(...allValues);
+          const maxValue = Math.max(...allValues);
+
+          return (
+            <div className="h-screen bg-black text-white flex flex-col">
+              {/* Fixed Header */}
+              <div className="flex-none p-4 border-b border-gray-800">
+                <div className="text-center mb-4">
+                  <h1 className="text-4xl font-bold mb-4">Gexome Heatmap</h1>
+                  
+                  <div className="flex items-center justify-center gap-6 mb-4 flex-wrap">
+                    <form onSubmit={handleTickerSubmit} className="flex items-center gap-2">
+                      <label className="text-sm text-gray-400">Ticker:</label>
+                      <input
+                        type="text"
+                        value={inputTicker}
+                        onChange={(e) => setInputTicker(e.target.value.toUpperCase())}
+                        className="bg-black border border-gray-700 rounded px-3 py-2 w-28 uppercase text-white"
+                        placeholder="z.B. AAPL"
+                      />
+                      <button
+                        type="submit"
+                        className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded"
+                      >
+                        ✓ Laden
+                      </button>
+                    </form>
+                    
+                    <div className="flex items-center gap-2">
+                      <label className="text-sm text-gray-400">Exposure:</label>
+                      <select
+                        value={exposure}
+                        onChange={(e) => setExposure(e.target.value)}
+                        className="bg-black border border-gray-700 rounded px-3 py-2 text-white"
+                      >
+                        <option value="gamma">Gamma Exposure (GEX)</option>
+                        <option value="delta">Delta Exposure (DEX)</option>
+                        <option value="vanna">Vanna Exposure</option>
+                      </select>
+                    </div>
+
+                    <button
+                      onClick={loadData}
+                      disabled={loading}
+                      className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded disabled:opacity-50"
+                    >
+                      {loading ? '⏳' : '🔄'} Aktualisieren
+                    </button>
+                  </div>
+
+                  {error && (
+                    <div className="text-yellow-400 text-sm mt-2">
+                      ⚠️ {error}
+                    </div>
+                  )}
+                </div>
+
+                <div className="text-center">
+                  <h2 className="text-2xl">
+                    {exposure === 'gamma' ? 'GEX' : exposure === 'delta' ? 'DEX' : 'VEX'} — Current Price: ${currentPrice?.toFixed(2)}
+                  </h2>
+                  <div className="text-sm text-gray-500 mt-2">
+                    🔄 Auto-Update alle 60s | Letzte Aktualisierung: {new Date(heatmapData.timestamp).toLocaleTimeString('de-DE')}
+                  </div>
+                </div>
+              </div>
+
+              {/* Scrollable Table Area */}
+              <div className="flex-1 overflow-hidden flex">
+                <div className="flex-1 overflow-auto">
+                  <table className="w-full border-collapse text-xs">
+                    <thead className="sticky top-0 z-20">
+                      <tr>
+                        <th className="bg-gray-900 p-2 text-left sticky left-0 z-30 border-r border-gray-800 text-xs w-16">Strike</th>
+                        {heatmapData.dates.map((date, idx) => (
+                          <th key={date} className="bg-gray-800 p-2 text-center min-w-[100px] border-r border-gray-700">
+                            <div className="font-bold text-sm">{heatmapData.labels[idx]}</div>
+                            <div className="text-xs text-gray-400">
+                              {new Date(date).toLocaleDateString('de-DE', { month: '2-digit', day: '2-digit' })}
+                            </div>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {heatmapData.data.map((row, idx) => {
+                        const closestStrike = heatmapData.data.reduce((prev, curr) => {
+                          return Math.abs(parseFloat(curr.strike) - currentPrice) < Math.abs(parseFloat(prev.strike) - currentPrice) ? curr : prev;
+                        });
+                        const isCurrentPrice = row.strike === closestStrike.strike;
+                        return (
+                          <tr key={idx} className={`border-t border-gray-800 ${isCurrentPrice ? 'border-t-2 border-b-2 border-yellow-500' : ''}`}>
+                            <td className={`p-1 px-2 font-mono text-right sticky left-0 bg-black z-10 border-r border-gray-800 text-xs w-16 ${isCurrentPrice ? 'font-bold text-yellow-400 text-sm border-r-2 border-yellow-500' : ''}`}>
+                              {row.strike}
+                            </td>
+                            {heatmapData.dates.map(date => (
+                              <td
+                                key={date}
+                                className={`p-1.5 text-center font-mono transition-all hover:brightness-125 cursor-pointer border-r border-gray-800 text-xs ${isCurrentPrice ? 'border-t-2 border-b-2 border-yellow-500' : ''}`}
+                                style={{
+                                  backgroundColor: getColorForValue(row[date], minValue, maxValue)
+                                }}
+                                title={`Strike: ${row.strike}, Date: ${date}, Value: ${formatValue(row[date])}`}
+                              >
+                                {formatValue(row[date])}
+                              </td>
+                            ))}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Fixed GEX Scale */}
+                <div className="flex-none flex flex-col justify-center items-center w-[140px] bg-gray-900 border-l border-gray-800 p-4">
+                  <div className="text-sm font-bold mb-3 text-center">GEX Scale</div>
+                  
+                  <div className="mb-4">
+                    <div className="text-xs text-gray-400 mb-2 text-center">Positiv</div>
+                    <div className="flex flex-col gap-1">
+                      {[1, 0.5, 0.1].map((intensity) => (
+                        <div key={intensity} className="flex items-center gap-2">
+                          <div 
+                            className="w-12 h-6 rounded"
+                            style={{
+                              backgroundColor: `rgb(${10 + intensity * 50}, ${80 + intensity * 175}, ${120 + intensity * 135})`
+                            }}
+                          ></div>
+                          <span className="text-xs text-gray-400">
+                            {intensity === 1 ? 'Hoch' : intensity === 0.1 ? 'Low' : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="w-full h-px bg-gray-600 my-2"></div>
+
+                  <div>
+                    <div className="text-xs text-gray-400 mb-2 text-center">Negativ</div>
+                    <div className="flex flex-col gap-1">
+                      {[0.1, 0.5, 1].map((intensity) => (
+                        <div key={intensity} className="flex items-center gap-2">
+                          <div 
+                            className="w-12 h-6 rounded"
+                            style={{
+                              backgroundColor: `rgb(${30 + intensity * 130}, ${15 + intensity * 45}, ${60 + intensity * 140})`
+                            }}
+                          ></div>
+                          <span className="text-xs text-gray-400">
+                            {intensity === 1 ? 'Hoch' : intensity === 0.1 ? 'Low' : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Fixed Footer */}
+              <div className="flex-none p-4 text-center text-sm text-gray-500 border-t border-gray-800">
+                made by @ben8124 & @optionsftw | Live Yahoo Finance Daten
+              </div>
+            </div>
+          );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<OptionsHeatmap />);
+    </script>
+</body>
+</html>
