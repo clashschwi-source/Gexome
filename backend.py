@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import yfinance as yf
 import numpy as np
+from scipy.stats import norm
 from datetime import datetime
 import pytz
 
@@ -9,31 +10,37 @@ app = Flask(__name__)
 CORS(app)
 
 def get_eastern_today():
-    """Gibt das heutige Datum in US Eastern Time zurück (wo die Märkte laufen)"""
     eastern = pytz.timezone('US/Eastern')
-    now_eastern = datetime.now(eastern)
-    return now_eastern.date()
+    return datetime.now(eastern).date()
 
-def calc_charm(call_data, put_data, call_oi, put_oi, dte):
+def bs_greeks(S, K, T, r, sigma, option_type='call'):
     """
-    Charm = dDelta/dTime (auch Delta Decay genannt)
-    Approximation: charm ≈ -gamma * (r + (d2/T)) / (2*T)
-    Wir nutzen: charm_proxy = gamma * sqrt(T) als einfache Annäherung
-    Da yfinance kein charm liefert, approximieren wir es aus gamma und dte
+    Black-Scholes Vanna und Charm.
+    S = spot price, K = strike, T = time in years,
+    r = risk-free rate, sigma = implied vol
+    Returns: (vanna, charm)
     """
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0, 0.0
     try:
-        if 'gamma' not in call_data.columns:
-            return 0
-        call_gamma = call_data['gamma'].sum() if not call_data.empty else 0
-        put_gamma = put_data['gamma'].sum() if not put_data.empty else 0
-        T = max(dte, 0.5) / 365  # Zeit in Jahren, minimum 0.5 Tage
-        # Charm Approximation: gamma * sqrt(T) * OI
-        call_charm = call_oi * call_gamma * np.sqrt(T) * 100
-        put_charm = put_oi * put_gamma * np.sqrt(T) * 100
-        charm = (call_charm - put_charm) / 1_000_000
-        return round(charm, 2)
-    except:
-        return 0
+        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        pdf_d1 = norm.pdf(d1)
+
+        # Vanna = dDelta/dSigma = dVega/dS
+        # = -pdf(d1) * d2 / sigma
+        vanna = -pdf_d1 * d2 / sigma
+
+        # Charm = dDelta/dTime (per day, negative = delta decays)
+        # Call charm:  -pdf(d1) * (2*r*T - d2*sigma*sqrt(T)) / (2*T*sigma*sqrt(T))
+        # Put charm = call charm (same formula, put delta is call delta - 1)
+        charm_raw = -pdf_d1 * (2 * r * T - d2 * sigma * np.sqrt(T)) / (2 * T * sigma * np.sqrt(T))
+        # Convert to per-day
+        charm = charm_raw / 365
+
+        return float(vanna), float(charm)
+    except Exception:
+        return 0.0, 0.0
 
 @app.route('/api/options/<ticker>')
 def get_options(ticker):
@@ -131,16 +138,23 @@ def get_options(ticker):
             else:
                 dex = round((call_oi - put_oi) / 10000, 2)
 
-            # Vanna
-            if 'vanna' in calls.columns:
-                call_vanna = call_data['vanna'].sum() if not call_data.empty else 0
-                put_vanna = put_data['vanna'].sum() if not put_data.empty else 0
-                vex = round(((call_oi * call_vanna) - (put_oi * put_vanna)) * 100 / 1_000_000, 2)
-            else:
-                vex = 0
+            # Black-Scholes Vanna + Charm pro Strike
+            # Nutze impliedVolatility aus yfinance, berechne BS greeks selbst
+            T = max(selected_dte, 0.5) / 365  # Zeit in Jahren
+            r = 0.05  # Risk-free rate (~aktueller Fed Rate)
 
-            # Charm
-            charm = calc_charm(call_data, put_data, call_oi, put_oi, selected_dte)
+            call_iv = float(call_data['impliedVolatility'].mean()) if not call_data.empty and 'impliedVolatility' in call_data.columns else 0.2
+            put_iv  = float(put_data['impliedVolatility'].mean())  if not put_data.empty  and 'impliedVolatility' in put_data.columns  else 0.2
+            call_iv = call_iv if call_iv > 0 else 0.2
+            put_iv  = put_iv  if put_iv  > 0 else 0.2
+
+            c_vanna, c_charm = bs_greeks(current_price, strike, T, r, call_iv, 'call')
+            p_vanna, p_charm = bs_greeks(current_price, strike, T, r, put_iv,  'put')
+
+            # VEX: (Call_OI * call_vanna - Put_OI * put_vanna) * 100 contracts / 1M scaling
+            vex   = round(((call_oi * c_vanna) - (put_oi * p_vanna)) * 100 / 1_000_000, 2)
+            # Charm Exposure: same structure as GEX but with charm greek
+            charm = round(((call_oi * c_charm) - (put_oi * p_charm)) * 100 / 1_000_000, 2)
 
             exposure_data.append({
                 'strike': strike,
