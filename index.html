@@ -47,30 +47,34 @@ const GREEKS=[
     {key:'charm',label:'Charm',title:'Charm (Delta Decay)'},
 ];
 
+// ─── GAMMA FLIP (kumulativer GEX Zero-Crossing) ────────────────
+// Professionelle Methode (SpotGamma / VannaCharm):
+// GEX von lowest → highest Strike aufsummieren.
+// Wo die kumulative Summe die Nulllinie kreuzt = Gamma Flip.
+const findGammaFlip = (rows, S) => {
+    const sorted = [...rows].sort((a, b) => a.strike - b.strike);
+    if (sorted.length < 2) return null;
+
+    let cum = 0;
+    for (let i = 0; i < sorted.length - 1; i++) {
+        cum += (sorted[i].gex || 0);
+        const cumNext = cum + (sorted[i + 1].gex || 0);
+        // Zero-Crossing: kumulative Summe wechselt Vorzeichen
+        if ((cum < 0 && cumNext >= 0) || (cum >= 0 && cumNext < 0)) {
+            // Gib den Strike zurück der näher an Null liegt
+            return Math.abs(cum) < Math.abs(cumNext)
+                ? sorted[i].strike
+                : sorted[i + 1].strike;
+        }
+    }
+    return null;
+};
+
 // ─── KEY LEVELS ────────────────────────────────────────────────
 const KeyLevels = ({data, onClose}) => {
     const rows=data.data, S=data.currentPrice;
-    // Gamma Flip: kumulativer GEX von ATM aus nach oben suchen
-    let gammaFlip=null;
-    {
-        const atmIdx=rows.reduce((bi,r,i)=>Math.abs(r.strike-S)<Math.abs(rows[bi].strike-S)?i:bi,0);
-        let cum=0;
-        // Von ATM nach oben
-        for(let i=atmIdx;i<rows.length-1;i++){
-            cum+=(rows[i].gex||0);
-            const cumNext=cum+(rows[i+1].gex||0);
-            if((cum>=0&&cumNext<0)||(cum<0&&cumNext>=0)){gammaFlip=rows[i+1].strike;break;}
-        }
-        // Falls nicht gefunden, von ATM nach unten
-        if(!gammaFlip){
-            cum=0;
-            for(let i=atmIdx;i>0;i--){
-                cum+=(rows[i].gex||0);
-                const cumNext=cum+(rows[i-1].gex||0);
-                if((cum>=0&&cumNext<0)||(cum<0&&cumNext>=0)){gammaFlip=rows[i-1].strike;break;}
-            }
-        }
-    }
+    const gammaFlip = findGammaFlip(rows, S);
+
     const maxCallOI=[...rows].sort((a,b)=>b.call_oi-a.call_oi)[0];
     const maxPutOI =[...rows].sort((a,b)=>b.put_oi-a.put_oi)[0];
     const top2gex  =[...rows].sort((a,b)=>Math.abs(b.gex)-Math.abs(a.gex)).slice(0,2);
@@ -157,19 +161,16 @@ const VolSmile = ({ticker}) => {
         const allS=series.flatMap(s=>s.points.map(p=>p.strike));
         if(!allIV.length) return;
 
-        // Y-Achse: nur echter IV Bereich + kleiner Puffer (kein 0-99!)
         const rawMin=Math.min(...allIV), rawMax=Math.max(...allIV);
         const ivRange=rawMax-rawMin;
         const minIV=Math.max(0, rawMin - ivRange*0.08);
         const maxIV=rawMax + ivRange*0.12;
 
-        // X-Achse: ±10% um Spot statt ganzer Strike-Range
         const S=sd.currentPrice;
         const minS=Math.min(...allS), maxS=Math.max(...allS);
         const toX=s=>P.l+(s-minS)/(maxS-minS)*(W-P.l-P.r);
         const toY=iv=>H-P.b-(iv-minIV)/(maxIV-minIV)*(H-P.t-P.b);
 
-        // Horizontal grid lines (6 nice intervals)
         const ivStep=parseFloat(((maxIV-minIV)/5).toPrecision(2));
         const ivStart=Math.ceil(minIV/ivStep)*ivStep;
         ctx.lineWidth=1;
@@ -179,7 +180,6 @@ const VolSmile = ({ticker}) => {
             ctx.fillStyle='#506080'; ctx.font='10px monospace'; ctx.textAlign='right';
             ctx.fillText(iv.toFixed(1)+'%',P.l-5,y+4);
         }
-        // Vertical grid + x labels
         for(let i=0;i<=7;i++){
             const s=minS+(maxS-minS)*i/7, x=toX(s);
             ctx.strokeStyle='#151c30'; ctx.beginPath(); ctx.moveTo(x,P.t); ctx.lineTo(x,H-P.b); ctx.stroke();
@@ -187,7 +187,6 @@ const VolSmile = ({ticker}) => {
             ctx.fillText('$'+Math.round(s),x,H-P.b+16);
         }
 
-        // Spot line
         const sx=toX(S);
         ctx.strokeStyle='rgba(255,220,0,0.7)'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
         ctx.beginPath(); ctx.moveTo(sx,P.t); ctx.lineTo(sx,H-P.b); ctx.stroke();
@@ -195,7 +194,6 @@ const VolSmile = ({ticker}) => {
         ctx.fillStyle='#ffdd00'; ctx.font='bold 10px monospace'; ctx.textAlign='center';
         ctx.fillText('SPOT $'+(S?.toFixed(0)),sx,H-P.b+30);
 
-        // Series
         series.forEach((s,i)=>{
             const color=SMILE_COLORS[i%SMILE_COLORS.length];
             if(s.points.length<2) return;
@@ -318,20 +316,10 @@ const App = () => {
                     {error&&<span className="text-red-400">⚠️ {error}</span>}
                     {/* REGIME INDICATOR */}
                     {(()=>{
-                        const rows=data.data, S=data.currentPrice;
-                        let flip=null;
-                        {
-                            const atmIdx=rows.reduce((bi,r,i)=>Math.abs(r.strike-S)<Math.abs(rows[bi].strike-S)?i:bi,0);
-                            let cum=0;
-                            for(let i=atmIdx;i<rows.length-1;i++){
-                                cum+=(rows[i].gex||0);
-                                const cn=cum+(rows[i+1].gex||0);
-                                if((cum>=0&&cn<0)||(cum<0&&cn>=0)){flip=rows[i+1].strike;break;}
-                            }
-                            if(!flip){cum=0;for(let i=atmIdx;i>0;i--){cum+=(rows[i].gex||0);const cn=cum+(rows[i-1].gex||0);if((cum>=0&&cn<0)||(cum<0&&cn>=0)){flip=rows[i-1].strike;break;}}}
-                        }
+                        if(!data) return null;
+                        const flip = findGammaFlip(data.data, data.currentPrice);
                         if(!flip) return null;
-                        const positive = S > flip;
+                        const positive = data.currentPrice > flip;
                         return (
                             <div className="ml-auto flex items-center gap-2 px-4 py-1 rounded-full border"
                                 style={{
