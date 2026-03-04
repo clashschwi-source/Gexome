@@ -50,14 +50,27 @@ const GREEKS=[
 // ─── KEY LEVELS ────────────────────────────────────────────────
 const KeyLevels = ({data, onClose}) => {
     const rows=data.data, S=data.currentPrice;
-    // Kumulativer GEX Nulldurchgang = echter Gamma Flip
+    // Gamma Flip: kumulativer GEX von ATM aus nach oben suchen
     let gammaFlip=null;
-    {let cum=0,prev=null;
-    for(let i=0;i<rows.length;i++){
-        cum+=(rows[i].gex||0);
-        if(prev!==null&&((prev<0&&cum>=0)||(prev>=0&&cum<0))){gammaFlip=rows[i].strike;break;}
-        prev=cum;
-    }}
+    {
+        const atmIdx=rows.reduce((bi,r,i)=>Math.abs(r.strike-S)<Math.abs(rows[bi].strike-S)?i:bi,0);
+        let cum=0;
+        // Von ATM nach oben
+        for(let i=atmIdx;i<rows.length-1;i++){
+            cum+=(rows[i].gex||0);
+            const cumNext=cum+(rows[i+1].gex||0);
+            if((cum>=0&&cumNext<0)||(cum<0&&cumNext>=0)){gammaFlip=rows[i+1].strike;break;}
+        }
+        // Falls nicht gefunden, von ATM nach unten
+        if(!gammaFlip){
+            cum=0;
+            for(let i=atmIdx;i>0;i--){
+                cum+=(rows[i].gex||0);
+                const cumNext=cum+(rows[i-1].gex||0);
+                if((cum>=0&&cumNext<0)||(cum<0&&cumNext>=0)){gammaFlip=rows[i-1].strike;break;}
+            }
+        }
+    }
     const maxCallOI=[...rows].sort((a,b)=>b.call_oi-a.call_oi)[0];
     const maxPutOI =[...rows].sort((a,b)=>b.put_oi-a.put_oi)[0];
     const top2gex  =[...rows].sort((a,b)=>Math.abs(b.gex)-Math.abs(a.gex)).slice(0,2);
@@ -136,39 +149,51 @@ const VolSmile = ({ticker}) => {
     useEffect(()=>{
         if(!sd||!ref.current) return;
         const cv=ref.current, ctx=cv.getContext('2d');
-        const W=cv.width, H=cv.height, P={t:35,r:20,b:55,l:58};
-        ctx.clearRect(0,0,W,H); ctx.fillStyle='#090b14'; ctx.fillRect(0,0,W,H);
+        const W=cv.width, H=cv.height, P={t:40,r:30,b:50,l:62};
+        ctx.clearRect(0,0,W,H); ctx.fillStyle='#070910'; ctx.fillRect(0,0,W,H);
         const series=sd.series;
         if(!series?.length) return;
         const allIV=series.flatMap(s=>s.points.map(p=>p.iv));
         const allS=series.flatMap(s=>s.points.map(p=>p.strike));
         if(!allIV.length) return;
-        const minIV=Math.max(0,Math.min(...allIV)-2), maxIV=Math.max(...allIV)+3;
-        const minS=Math.min(...allS), maxS=Math.max(...allS), S=sd.currentPrice;
+
+        // Y-Achse: nur echter IV Bereich + kleiner Puffer (kein 0-99!)
+        const rawMin=Math.min(...allIV), rawMax=Math.max(...allIV);
+        const ivRange=rawMax-rawMin;
+        const minIV=Math.max(0, rawMin - ivRange*0.08);
+        const maxIV=rawMax + ivRange*0.12;
+
+        // X-Achse: ±10% um Spot statt ganzer Strike-Range
+        const S=sd.currentPrice;
+        const minS=Math.min(...allS), maxS=Math.max(...allS);
         const toX=s=>P.l+(s-minS)/(maxS-minS)*(W-P.l-P.r);
         const toY=iv=>H-P.b-(iv-minIV)/(maxIV-minIV)*(H-P.t-P.b);
 
-        // Grid
+        // Horizontal grid lines (6 nice intervals)
+        const ivStep=parseFloat(((maxIV-minIV)/5).toPrecision(2));
+        const ivStart=Math.ceil(minIV/ivStep)*ivStep;
         ctx.lineWidth=1;
-        for(let i=0;i<=5;i++){
-            const iv=minIV+(maxIV-minIV)*i/5, y=toY(iv);
-            ctx.strokeStyle='#1a2040'; ctx.beginPath(); ctx.moveTo(P.l,y); ctx.lineTo(W-P.r,y); ctx.stroke();
-            ctx.fillStyle='#4a5680'; ctx.font='10px monospace'; ctx.textAlign='right';
+        for(let iv=ivStart; iv<=maxIV+0.01; iv+=ivStep){
+            const y=toY(iv);
+            ctx.strokeStyle='#151c30'; ctx.beginPath(); ctx.moveTo(P.l,y); ctx.lineTo(W-P.r,y); ctx.stroke();
+            ctx.fillStyle='#506080'; ctx.font='10px monospace'; ctx.textAlign='right';
             ctx.fillText(iv.toFixed(1)+'%',P.l-5,y+4);
         }
-        for(let i=0;i<=6;i++){
-            const s=minS+(maxS-minS)*i/6, x=toX(s);
-            ctx.fillStyle='#4a5680'; ctx.font='9px monospace'; ctx.textAlign='center';
-            ctx.fillText('$'+Math.round(s),x,H-P.b+18);
+        // Vertical grid + x labels
+        for(let i=0;i<=7;i++){
+            const s=minS+(maxS-minS)*i/7, x=toX(s);
+            ctx.strokeStyle='#151c30'; ctx.beginPath(); ctx.moveTo(x,P.t); ctx.lineTo(x,H-P.b); ctx.stroke();
+            ctx.fillStyle='#506080'; ctx.font='9px monospace'; ctx.textAlign='center';
+            ctx.fillText('$'+Math.round(s),x,H-P.b+16);
         }
 
-        // Spot
+        // Spot line
         const sx=toX(S);
-        ctx.strokeStyle='#ffdd00'; ctx.lineWidth=1.5; ctx.setLineDash([5,4]);
+        ctx.strokeStyle='rgba(255,220,0,0.7)'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
         ctx.beginPath(); ctx.moveTo(sx,P.t); ctx.lineTo(sx,H-P.b); ctx.stroke();
         ctx.setLineDash([]);
         ctx.fillStyle='#ffdd00'; ctx.font='bold 10px monospace'; ctx.textAlign='center';
-        ctx.fillText('SPOT $'+(S?.toFixed(0)),sx,H-P.b+32);
+        ctx.fillText('SPOT $'+(S?.toFixed(0)),sx,H-P.b+30);
 
         // Series
         series.forEach((s,i)=>{
@@ -295,12 +320,16 @@ const App = () => {
                     {(()=>{
                         const rows=data.data, S=data.currentPrice;
                         let flip=null;
-                        {let cum=0,prev=null;
-                        for(let i=0;i<rows.length;i++){
-                            cum+=(rows[i].gex||0);
-                            if(prev!==null&&((prev<0&&cum>=0)||(prev>=0&&cum<0))){flip=rows[i].strike;break;}
-                            prev=cum;
-                        }}
+                        {
+                            const atmIdx=rows.reduce((bi,r,i)=>Math.abs(r.strike-S)<Math.abs(rows[bi].strike-S)?i:bi,0);
+                            let cum=0;
+                            for(let i=atmIdx;i<rows.length-1;i++){
+                                cum+=(rows[i].gex||0);
+                                const cn=cum+(rows[i+1].gex||0);
+                                if((cum>=0&&cn<0)||(cum<0&&cn>=0)){flip=rows[i+1].strike;break;}
+                            }
+                            if(!flip){cum=0;for(let i=atmIdx;i>0;i--){cum+=(rows[i].gex||0);const cn=cum+(rows[i-1].gex||0);if((cum>=0&&cn<0)||(cum<0&&cn>=0)){flip=rows[i-1].strike;break;}}}
+                        }
                         if(!flip) return null;
                         const positive = S > flip;
                         return (
